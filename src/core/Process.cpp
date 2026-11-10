@@ -1,6 +1,8 @@
 #include "core/Process.h"
 #include "core/Util.h"
 
+#include <sddl.h>
+
 #include <algorithm>
 #include <string_view>
 
@@ -14,6 +16,89 @@ bool IsProcessWow64(HANDLE process)
         return false;
     }
     return processMachine != IMAGE_FILE_MACHINE_UNKNOWN;
+}
+
+std::wstring GetProcessImageName(HANDLE process)
+{
+    wchar_t buffer[MAX_PATH * 2] = {};
+    DWORD size = static_cast<DWORD>(std::size(buffer));
+    if (QueryFullProcessImageNameW(process, 0, buffer, &size)) {
+        return std::wstring(buffer, size);
+    }
+    return {};
+}
+
+bool IsProtectedExecutable(std::wstring_view imagePathOrName)
+{
+    // Защитное ПО (антивирусы, EDR) и критичные системные процессы. Нижний регистр.
+    static constexpr std::wstring_view kProtected[] = {
+        // Критичные системные процессы
+        L"smss.exe", L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe",
+        L"lsass.exe", L"lsaiso.exe", L"fontdrvhost.exe", L"dwm.exe", L"sihost.exe",
+        // Microsoft Defender / Windows Security
+        L"msmpeng.exe", L"mpdefendercoreservice.exe", L"nissrv.exe", L"smartscreen.exe",
+        L"securityhealthservice.exe", L"securityhealthsystray.exe",
+        // Kaspersky
+        L"avp.exe", L"avpui.exe", L"ksde.exe", L"ksdeui.exe",
+        // ESET
+        L"ekrn.exe", L"egui.exe",
+        // Bitdefender
+        L"bdagent.exe", L"vsserv.exe", L"bdservicehost.exe",
+        // Avast / AVG
+        L"avastsvc.exe", L"avastui.exe", L"avgsvc.exe", L"aswidsagent.exe",
+        // Avira
+        L"avguard.exe", L"avgnt.exe",
+        // McAfee
+        L"mcshield.exe", L"masvc.exe", L"mfemms.exe",
+        // Norton / Symantec
+        L"ccsvchst.exe", L"nortonsecurity.exe", L"rtvscan.exe", L"savservice.exe",
+        // Sophos / Dr.Web / прочее
+        L"sophosui.exe", L"savservice.exe", L"dwengine.exe", L"dwservice.exe", L"spideragent.exe",
+    };
+
+    // Имя файла из пути
+    size_t slash = imagePathOrName.find_last_of(L"\\/");
+    std::wstring_view name = slash == std::wstring_view::npos ? imagePathOrName : imagePathOrName.substr(slash + 1);
+    for (auto candidate : kProtected) {
+        if (EqualsIgnoreCase(name, candidate)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// SID пользователя из токена процесса в виде строки; пусто при ошибке.
+std::wstring TokenUserSid(HANDLE process)
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        return {};
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::byte> buffer(size);
+    std::wstring sid;
+    if (size && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+        auto* user = reinterpret_cast<TOKEN_USER*>(buffer.data());
+        wchar_t* text = nullptr;
+        if (ConvertSidToStringSidW(user->User.Sid, &text)) {
+            sid = text;
+            LocalFree(text);
+        }
+    }
+    CloseHandle(token);
+    return sid;
+}
+
+} // namespace
+
+bool ProcessUserMatchesCurrent(HANDLE process)
+{
+    const std::wstring mine = TokenUserSid(GetCurrentProcess());
+    const std::wstring other = TokenUserSid(process);
+    return !mine.empty() && !other.empty() && mine == other;
 }
 
 DWORD InjectDll(HANDLE process, const std::wstring& dllPath, DWORD timeoutMs)

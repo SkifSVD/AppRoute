@@ -143,6 +143,12 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
+    // Прозрачность: явно сообщаем, что и куда направляется
+    Line(std::format(L"AppRoute: трафик «{}»{} идёт через интерфейс «{}».",
+                     options->commandLine,
+                     options->children ? L" и его дочерних процессов" : L"",
+                     adapter->alias));
+
     // Правило — через окружение: его унаследуют и дочерние процессы (issue #8)
     SetEnvironmentVariableW(kEnvAdapter, GuidToString(adapter->guid).c_str());
     SetEnvironmentVariableW(kEnvLog, options->log.empty() ? nullptr : options->log.c_str());
@@ -160,6 +166,17 @@ int wmain(int argc, wchar_t** argv)
     if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
                         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi)) {
         Line(std::format(L"Ошибка запуска: {}", Win32ErrorMessage(GetLastError())));
+        return 1;
+    }
+
+    // Защитная граница: AppRoute не вмешивается в защитное ПО и системные процессы
+    const std::wstring image = GetProcessImageName(pi.hProcess);
+    if (IsProtectedExecutable(image)) {
+        Line(std::format(L"Отказ: {} — защитное или системное ПО, AppRoute в него не вмешивается.",
+                         image));
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
         return 1;
     }
 
