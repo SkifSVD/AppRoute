@@ -795,7 +795,7 @@ void WINAPI ServiceMain(DWORD, wchar_t**)
     ReportService(SERVICE_RUNNING);
     int code = 1;
     try {
-        code = RunManager(g_serviceOptions, false, L"служба AppRoute");
+        code = RunManager(g_serviceOptions, false, L"менеджер маршрутов (служба AppRoute)");
     } catch (const std::exception& e) {
         Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
     }
