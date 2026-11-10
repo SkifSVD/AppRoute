@@ -51,6 +51,28 @@ struct RoutePlan {
 
 using LogFn = std::function<void(std::wstring_view)>;
 
+// Метрика IP-интерфейса для одного семейства адресов.
+struct InterfaceMetric {
+    NET_LUID luid{};
+    ADDRESS_FAMILY family = AF_UNSPEC;
+    ULONG metric = 0;
+    bool automatic = false;
+};
+
+// Снимок того, что нужно планировщику: таблица маршрутов и метрики интерфейсов.
+// Plan() по снимку — чистая функция, её можно проверять тестами без изменения системы.
+struct NetworkSnapshot {
+    std::vector<MIB_IPFORWARD_ROW2> routes;       // оба семейства
+    std::vector<InterfaceMetric> interfaces;
+
+    static NetworkSnapshot Capture();
+
+    const InterfaceMetric* FindInterface(NET_LUID luid, ADDRESS_FAMILY family) const;
+
+    // Итоговая метрика маршрута (маршрут + интерфейс), по которой Windows выбирает путь.
+    ULONG64 EffectiveMetric(const MIB_IPFORWARD_ROW2& route) const;
+};
+
 class RouteManager {
 public:
     explicit RouteManager(RoutePolicy policy);
@@ -60,6 +82,7 @@ public:
     // Вычисляет, что нужно изменить, чтобы система соответствовала политике. Ничего не меняет.
     // Повторный вызов после Apply() возвращает пустой план (идемпотентность).
     RoutePlan Plan() const;
+    RoutePlan Plan(const NetworkSnapshot& snapshot) const;
 
     // Применяет изменения; успешные запоминает в журнале для отката. Возвращает число ошибок.
     size_t Apply(const std::vector<RouteChange>& changes, const LogFn& log);
@@ -71,7 +94,7 @@ public:
     bool HasJournal() const { return !journal_.empty(); }
 
 private:
-    void PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const;
+    void PlanFamily(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const;
 
     RoutePolicy policy_;
     std::vector<RouteChange> journal_;

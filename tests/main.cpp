@@ -5,44 +5,17 @@
 #include "core/Policy.h"
 #include "core/Util.h"
 
+#include "Test.h"
+
 #include <cstdio>
-#include <functional>
 #include <string>
 #include <vector>
 
 using namespace approute;
+using approute::test::Failures;
+using approute::test::Registry;
 
 namespace {
-
-int g_failures = 0;
-
-#define CHECK(expr)                                                                   \
-    do {                                                                              \
-        if (!(expr)) {                                                                \
-            std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr);             \
-            ++g_failures;                                                             \
-        }                                                                             \
-    } while (0)
-
-struct TestCase {
-    const char* name;
-    std::function<void()> body;
-};
-
-std::vector<TestCase>& Registry()
-{
-    static std::vector<TestCase> tests;
-    return tests;
-}
-
-struct Register {
-    Register(const char* name, std::function<void()> body) { Registry().push_back({name, std::move(body)}); }
-};
-
-#define TEST(name)                                  \
-    void name();                                    \
-    const Register name##_reg(#name, name);         \
-    void name()
 
 constexpr char kGuid[] = "{0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0}";
 
@@ -332,9 +305,9 @@ int main()
 {
     int failedTests = 0;
     for (const auto& test : Registry()) {
-        const int before = g_failures;
+        const int before = Failures();
         test.body();
-        const bool ok = g_failures == before;
+        const bool ok = Failures() == before;
         failedTests += ok ? 0 : 1;
         std::printf("%s %s\n", ok ? "[ OK ]" : "[FAIL]", test.name);
     }
