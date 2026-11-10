@@ -40,6 +40,11 @@
 ./build.ps1 -Config Debug
 ```
 
+## CI
+
+Сборка выполняется на self-hosted runner с метками `self-hosted, Windows, X64, approute`
+(нужны Visual Studio с C++ и PowerShell 7). Пока runner не запущен, задания ждут в очереди.
+
 ## approute-routes (прототип менеджера маршрутов)
 
 ```powershell

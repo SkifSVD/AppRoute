@@ -4,18 +4,29 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# Один локальный runner — не запускаем сборки параллельно, старую отменяем
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # Локальный self-hosted runner (см. docs: README, раздел «CI»)
+    runs-on: [self-hosted, Windows, X64, approute]
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -S . -B build -A x64
-
+      # build.ps1 сам найдёт cmake из установленной Visual Studio
       - name: Build
-        run: cmake --build build --config Release
+        run: ./build.ps1 -Config Release
 
       - uses: actions/upload-artifact@v4
         with:
