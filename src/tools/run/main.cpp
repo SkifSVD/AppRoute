@@ -3,10 +3,11 @@
 //   approute-run --adapter <интерфейс> [--log <файл>] [--no-wait] -- <программа> [аргументы...]
 //
 // Программа стартует приостановленной, в неё внедряется approute-hook64.dll, затем она
-// продолжает работу. Правило передаётся через переменные окружения (наследуются дочерними
-// процессами). Минимальная версия для проверки #5; полноценный launcher — issue #7.
+// продолжает работу. Правило передаётся через переменные окружения; дочерние процессы
+// получают его от hook-DLL (#8). Полноценный launcher (x86) — issue #7.
 
 #include "core/NetAdapters.h"
+#include "core/Process.h"
 #include "core/Util.h"
 
 #include <format>
@@ -43,17 +44,19 @@ void PrintUsage()
 {
     Line(L"approute-run — запуск программы через выбранный сетевой интерфейс");
     Line(L"");
-    Line(L"  approute-run --adapter IF [--log FILE] [--no-wait] -- PROGRAM [ARGS...]");
+    Line(L"  approute-run --adapter IF [--log FILE] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
     Line(L"");
-    Line(L"  IF         ifIndex, GUID или имя интерфейса (см. approute-routes list)");
-    Line(L"  --log      журнал hook-DLL (все процессы пишут в один файл)");
-    Line(L"  --no-wait  не ждать завершения программы");
+    Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list)");
+    Line(L"  --log          журнал hook-DLL (все процессы пишут в один файл)");
+    Line(L"  --no-children  не применять правило к дочерним процессам");
+    Line(L"  --no-wait      не ждать завершения программы");
 }
 
 struct Options {
     std::wstring adapter;
     std::wstring log;
     bool wait = true;
+    bool children = true;
     std::wstring commandLine;   // всё после " -- ", как есть
 };
 
@@ -88,6 +91,8 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
             (arg == L"--adapter" ? o.adapter : o.log) = argv[++i];
         } else if (arg == L"--no-wait") {
             o.wait = false;
+        } else if (arg == L"--no-children") {
+            o.children = false;
         } else {
             Line(std::format(L"Ошибка: неизвестный параметр {}", arg));
             return std::nullopt;
@@ -110,50 +115,6 @@ std::wstring HookDllPath()
     return path + L"approute-hook64.dll";
 }
 
-bool IsWow64(HANDLE process)
-{
-    USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
-    USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
-    if (!IsWow64Process2(process, &processMachine, &nativeMachine)) {
-        return false;
-    }
-    return processMachine != IMAGE_FILE_MACHINE_UNKNOWN;
-}
-
-// LoadLibraryW(dllPath) в целевом процессе через удалённый поток.
-DWORD InjectDll(HANDLE process, const std::wstring& dllPath)
-{
-    const SIZE_T bytes = (dllPath.size() + 1) * sizeof(wchar_t);
-    void* remote = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remote) {
-        return GetLastError();
-    }
-    DWORD result = NO_ERROR;
-    if (!WriteProcessMemory(process, remote, dllPath.c_str(), bytes, nullptr)) {
-        result = GetLastError();
-    } else {
-        auto* loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-        HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remote, 0, nullptr);
-        if (!thread) {
-            result = GetLastError();
-        } else {
-            if (WaitForSingleObject(thread, 15000) != WAIT_OBJECT_0) {
-                result = WAIT_TIMEOUT;
-            } else {
-                DWORD module = 0;   // младшие 32 бита HMODULE: 0 — LoadLibraryW не удался
-                GetExitCodeThread(thread, &module);
-                if (module == 0) {
-                    result = ERROR_MOD_NOT_FOUND;
-                }
-            }
-            CloseHandle(thread);
-        }
-    }
-    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-    return result;
-}
-
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -171,6 +132,11 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
+    if (IsProcessElevated()) {
+        Line(L"Внимание: запуск от имени администратора. Браузеры на Chromium в этом случае");
+        Line(L"перезапускают себя без прав; AppRoute отслеживает это, но надёжнее обычный терминал.");
+    }
+
     const auto dll = HookDllPath();
     if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
         Line(std::format(L"Ошибка: не найдена {}", dll));
@@ -178,22 +144,26 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // Правило — через окружение: его унаследуют и дочерние процессы (issue #8)
-    SetEnvironmentVariableW(L"APPROUTE_ADAPTER", GuidToString(adapter->guid).c_str());
-    if (!options->log.empty()) {
-        SetEnvironmentVariableW(L"APPROUTE_LOG", options->log.c_str());
-    }
+    SetEnvironmentVariableW(kEnvAdapter, GuidToString(adapter->guid).c_str());
+    SetEnvironmentVariableW(kEnvLog, options->log.empty() ? nullptr : options->log.c_str());
+    SetEnvironmentVariableW(kEnvChildren, options->children ? nullptr : L"0");
 
     std::wstring commandLine = options->commandLine;
     STARTUPINFOW si{};
     si.cb = sizeof(si);
+    // Как при обычном запуске из консоли: программа (в т.ч. GUI) получает наши stdin/stdout/stderr
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+    if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
                         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi)) {
         Line(std::format(L"Ошибка запуска: {}", Win32ErrorMessage(GetLastError())));
         return 1;
     }
 
-    if (IsWow64(pi.hProcess)) {
+    if (IsProcessWow64(pi.hProcess)) {
         Line(L"Ошибка: 32-битные программы пока не поддерживаются (issue #7)");
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
