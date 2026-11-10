@@ -7,6 +7,7 @@ add_library(approute_core STATIC
     ConflictGuard.h ConflictGuard.cpp
     Process.h       Process.cpp
     DnsResolver.h   DnsResolver.cpp
+    Nrpt.h          Nrpt.cpp
     Json.h          Json.cpp
     Config.h        Config.cpp
     Launcher.h      Launcher.cpp
