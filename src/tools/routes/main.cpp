@@ -823,8 +823,19 @@ int CmdService(const Options& options)
     return 0;
 }
 
+// Итог установки/удаления — и в %ProgramData%\AppRoute\install.log: approute-gui запускает команду
+// без консоли и показывает пользователю последнюю строку
+void OpenInstallLog()
+{
+    const std::wstring dir = ProgramDataDirectory();
+    if (!dir.empty() && IsProcessElevated()) {
+        g_logFile = OpenProtectedLog(dir, L"install.log");
+    }
+}
+
 int CmdInstallService(const Options& options)
 {
+    OpenInstallLog();
     if (!IsProcessElevated()) {
         Line(L"Ошибка: для установки службы нужны права администратора.");
         return 2;
@@ -843,6 +854,7 @@ int CmdInstallService(const Options& options)
 
 int CmdUninstallService()
 {
+    OpenInstallLog();
     if (!IsProcessElevated()) {
         Line(L"Ошибка: для удаления службы нужны права администратора.");
         return 2;

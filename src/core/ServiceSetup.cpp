@@ -174,6 +174,18 @@ bool ConfigureService(SC_HANDLE service, const std::wstring& clientSid, std::wst
     return true;
 }
 
+// Файлы и ярлык установки
+void RemoveInstalledFiles(const std::wstring& dir)
+{
+    for (const auto& name : AppRouteBinaries(dir)) {
+        RemoveFile(dir + L"\\" + name);
+    }
+    if (!RemoveDirectoryW(dir.c_str())) {
+        MoveFileExW(dir.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);   // удалится после файлов
+    }
+    DeleteFileW(StartMenuShortcut().c_str());
+}
+
 } // namespace
 
 std::wstring InstallDirectory()
@@ -325,7 +337,17 @@ bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& c
     SaveShortcut(StartMenuShortcut(), spec, &ignored);
 
     if (!StartServiceW(service, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
-        return Fail(error, L"служба установлена, но не запустилась");
+        // Не оставляем в системе службу, которая не запускается: откат установки
+        const DWORD code = GetLastError();
+        DeleteService(service);
+        RemoveInstalledFiles(dir);
+        std::wstring why = L"служба не запустилась (" + Win32ErrorMessage(code) + L"), установка отменена";
+        if (code == ERROR_ACCESS_DENIED) {
+            why += L". Запуск, вероятно, запретил антивирус или политика компьютера: AppRoute их не обходит. "
+                   L"Можно разрешить службу в настройках антивируса (если это ваш компьютер) или запускать "
+                   L"менеджер маршрутов из окна без службы";
+        }
+        return Fail(error, why, 0);
     }
     return true;
 }
@@ -347,14 +369,7 @@ bool UninstallAppRouteService(std::wstring* error)
     } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST) {
         return Fail(error, L"нет доступа к службе AppRoute");
     }
-    const std::wstring dir = InstallDirectory();
-    for (const auto& name : AppRouteBinaries(dir)) {
-        RemoveFile(dir + L"\\" + name);
-    }
-    if (!RemoveDirectoryW(dir.c_str())) {
-        MoveFileExW(dir.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);   // удалится после файлов
-    }
-    DeleteFileW(StartMenuShortcut().c_str());
+    RemoveInstalledFiles(InstallDirectory());
     return true;
 }
 

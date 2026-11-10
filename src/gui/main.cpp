@@ -1364,6 +1364,37 @@ std::optional<DWORD> RunRoutesElevated(const std::wstring& params, std::wstring*
     return exitCode;
 }
 
+// Последняя строка %ProgramData%\AppRoute\install.log — итог install-service / uninstall-service
+std::wstring LastInstallMessage()
+{
+    wchar_t data[MAX_PATH * 2] = {};
+    if (!GetEnvironmentVariableW(L"ProgramData", data, static_cast<DWORD>(std::size(data)))) {
+        return {};
+    }
+    const HANDLE h = CreateFileW((std::wstring(data) + L"\\AppRoute\\install.log").c_str(), GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    std::string text(64 * 1024, '\0');
+    LARGE_INTEGER size{};
+    GetFileSizeEx(h, &size);
+    if (size.QuadPart > static_cast<LONGLONG>(text.size())) {
+        LARGE_INTEGER pos{};
+        pos.QuadPart = size.QuadPart - static_cast<LONGLONG>(text.size());
+        SetFilePointerEx(h, pos, nullptr, FILE_BEGIN);
+    }
+    DWORD read = 0;
+    ReadFile(h, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+    CloseHandle(h);
+    text.resize(read);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    const size_t start = text.find_last_of('\n');
+    return FromUtf8(start == std::string::npos ? text : text.substr(start + 1)).value_or(std::wstring());
+}
+
 bool ServiceInstalled()
 {
     const ServiceState s = QueryServiceState();
@@ -1391,10 +1422,14 @@ void InstallService()
         return;
     }
     if (*code != 0) {
+        const std::wstring why = LastInstallMessage();
         Message(g.main,
-                L"Служба AppRoute не установлена. Подробности покажет команда в консоли администратора:\n\n"
-                L"approute-routes install-service --config " + QuoteArgument(g.configPath),
+                L"Служба AppRoute не установлена.\n\n" +
+                    (why.empty() ? L"Подробности покажет команда в консоли администратора:\n\napproute-routes "
+                                   L"install-service --config " + QuoteArgument(g.configPath)
+                                 : why),
                 MB_ICONWARNING);
+        RefreshStates();
         return;
     }
     for (int i = 0; i < 25 && !IsRouteManagerRunning(); ++i) {
@@ -1413,8 +1448,11 @@ void UninstallService()
         return;
     }
     if (*code != 0) {
-        Message(g.main, L"Службу AppRoute удалить не удалось. Подробности покажет команда в консоли "
-                        L"администратора:\n\napproute-routes uninstall-service",
+        const std::wstring why = LastInstallMessage();
+        Message(g.main, L"Службу AppRoute удалить не удалось.\n\n" +
+                            (why.empty() ? L"Подробности покажет команда в консоли администратора:\n\n"
+                                           L"approute-routes uninstall-service"
+                                         : why),
                 MB_ICONWARNING);
         return;
     }
