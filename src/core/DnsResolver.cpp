@@ -190,7 +190,23 @@ bool ResolveWith(const std::wstring& name, const std::vector<WORD>& types, ULONG
 
 } // namespace
 
-DnsInterface MakeDnsInterface(const NetAdapter& adapter)
+// Запрос к серверу пойдёт через адаптер: сервер в его подсети или лучший маршрут — через него.
+static bool ReachableVia(const NetAdapter& adapter, const SOCKADDR_INET& server)
+{
+    for (const auto& u : adapter.unicast) {
+        if (InPrefix(server, u.address, u.prefixLength)) {
+            return true;
+        }
+    }
+    MIB_IPFORWARD_ROW2 route{};
+    SOCKADDR_INET source{};
+    if (GetBestRoute2(nullptr, 0, nullptr, &server, 0, &route, &source) != NO_ERROR) {
+        return false;
+    }
+    return route.InterfaceLuid.Value == adapter.luid.Value;
+}
+
+DnsInterface MakeDnsInterface(const NetAdapter& adapter, const std::vector<NrptRule>& nrpt)
 {
     DnsInterface d;
     d.ifIndex = adapter.ifIndex ? adapter.ifIndex : adapter.ipv6IfIndex;
@@ -201,16 +217,28 @@ DnsInterface MakeDnsInterface(const NetAdapter& adapter)
             d.hasIpv6 = true;
         }
     }
-    // Только серверы в подсети интерфейса: запрос к ним гарантированно идёт через него
     for (const auto& s : adapter.dnsServers) {
-        for (const auto& u : adapter.unicast) {
-            if (InPrefix(s, u.address, u.prefixLength)) {
-                d.dnsServers.push_back(s);
-                break;
+        if (ReachableVia(adapter, s)) {
+            d.dnsServers.push_back(s);
+        }
+    }
+    for (const auto& rule : nrpt) {
+        NrptRule own{rule.namespaces, {}};
+        for (const auto& s : rule.servers) {
+            if (ReachableVia(adapter, s)) {
+                own.servers.push_back(s);
             }
+        }
+        if (!own.servers.empty()) {
+            d.nrpt.push_back(std::move(own));
         }
     }
     return d;
+}
+
+DnsInterface MakeDnsInterface(const NetAdapter& adapter)
+{
+    return MakeDnsInterface(adapter, LoadNrptRules());
 }
 
 std::vector<DohServer> DefaultDohServers()
@@ -236,6 +264,19 @@ DnsAnswer ResolveViaInterface(const std::wstring& name, int family, const DnsInt
     answer.ttl = std::numeric_limits<ULONG>::max();
     if (types.empty()) {
         answer.outcome = DnsOutcome::NoSuchName;   // у интерфейса нет адресов нужного семейства
+        answer.ttl = 0;
+        return answer;
+    }
+
+    // 0) Пространство имён NRPT с серверами через этот интерфейс (корпоративный DNS VPN):
+    //    ответ только от них — внутреннее имя не должно уйти во внешний DoH
+    if (const NrptRule* rule = MatchNrpt(iface.nrpt, name)) {
+        ServerSet servers = PlainServers(rule->servers);
+        if (ResolveWith(name, types, iface.ifIndex, servers, kUdpTimeoutMs, answer)) {
+            answer.via = L"NRPT";
+            return answer;
+        }
+        answer.outcome = DnsOutcome::Failed;
         answer.ttl = 0;
         return answer;
     }
