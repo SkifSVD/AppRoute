@@ -414,6 +414,133 @@ TEST(RoutesGlobalSwitchToOpenVpnIpv6)
     CHECK(plan.warnings.empty());
 }
 
+// ---- Закреплённые подсети (--route) ------------------------------------------------
+
+PinnedRoute Pin(const wchar_t* prefix, NET_LUID luid)
+{
+    const auto p = ParsePrefix(prefix);
+    CHECK(p.has_value());
+    return {p.value_or(IP_ADDRESS_PREFIX{}), luid};
+}
+
+TEST(ParsePrefixFormats)
+{
+    CHECK(!ParsePrefix(L"198.51.101.0/23"));               // хвост за /23 не нулевой (101 нечётное)
+    CHECK(ParsePrefix(L"198.51.100.0/23").has_value());
+    const auto ok = ParsePrefix(L"198.51.100.0/24");
+    CHECK(ok && ok->PrefixLength == 24 && ok->Prefix.si_family == AF_INET);
+    const auto host = ParsePrefix(L"192.0.2.7");
+    CHECK(host && host->PrefixLength == 32);
+    const auto v6 = ParsePrefix(L"2001:db8::/32");
+    CHECK(v6 && v6->PrefixLength == 32 && v6->Prefix.si_family == AF_INET6);
+    CHECK(ParsePrefix(L"0.0.0.0/0").has_value());
+    CHECK(!ParsePrefix(L"192.0.2.0/33"));
+    CHECK(!ParsePrefix(L"192.0.2.0/"));
+    CHECK(!ParsePrefix(L"192.0.2.0/2x"));
+    CHECK(!ParsePrefix(L"happ-xray"));
+    CHECK(!ParsePrefix(L"2001:db8::1/32"));
+}
+
+TEST(RoutesPinnedAddedThroughVpn)
+{
+    // Весь трафик — через Wi-Fi, но подсеть сервиса — через VPN (TUN без шлюза: on-link)
+    auto s = WifiOnly();
+    AddHapp(s);
+    RoutePolicy policy = Policy(kWifi);
+    policy.pinned.push_back(Pin(L"198.51.100.0/24", kHapp));
+    const RouteManager manager(policy);
+
+    const auto plan = manager.Plan(s);
+    CHECK(FindChange(plan, ChangeKind::SetInterfaceMetric, kHapp) != nullptr);   // 0/0 Happ проигрывает
+    const auto* pin = FindChange(plan, ChangeKind::AddRoute, kHapp);
+    CHECK(pin && pin->route.DestinationPrefix.PrefixLength == 24 && IsZeroAddress(pin->route.NextHop));
+
+    Simulate(s, plan);
+    CHECK(SameLuid(Winner(s, AF_INET), kWifi));
+    CHECK(manager.Plan(s).changes.empty());   // идемпотентность
+
+    // VPN переподключился: его маршруты пропали и появились заново без нашей подсети
+    std::erase_if(s.routes, [](const MIB_IPFORWARD_ROW2& r) {
+        return SameLuid(r.InterfaceLuid, kHapp) && r.DestinationPrefix.PrefixLength == 24;
+    });
+    const auto again = manager.Plan(s);
+    CHECK(again.changes.size() == 1 && FindChange(again, ChangeKind::AddRoute, kHapp) != nullptr);
+}
+
+TEST(RoutesPinnedUsesInterfaceGateway)
+{
+    auto s = WifiOnly();
+    AddOpenVpn(s);
+    RoutePolicy policy = Policy(kWifi);
+    policy.pinned.push_back(Pin(L"203.0.113.0/24", kOpenVpn));
+    const auto plan = RouteManager(policy).Plan(s);
+    const MIB_IPFORWARD_ROW2* pinned = nullptr;
+    for (const auto& c : plan.changes) {
+        if (c.kind == ChangeKind::AddRoute && c.route.DestinationPrefix.PrefixLength == 24) {
+            pinned = &c.route;
+        }
+    }
+    CHECK(pinned && SameAddress(pinned->NextHop, Addr(L"10.8.0.1")));
+}
+
+TEST(RoutesPinnedWithoutPrimaryDefault)
+{
+    // Даже если основной без 0/0 (маршруты по умолчанию не трогаем), подсеть закрепляется
+    NetworkSnapshot s;
+    s.interfaces.push_back({kWifi, AF_INET, 35, true});
+    AddHapp(s);
+    RoutePolicy policy = Policy(kWifi);
+    policy.pinned.push_back(Pin(L"198.51.100.0/24", kHapp));
+    const auto plan = RouteManager(policy).Plan(s);
+    CHECK(plan.changes.size() == 1 && FindChange(plan, ChangeKind::AddRoute, kHapp) != nullptr);
+}
+
+TEST(RoutesPinnedInterfaceMissing)
+{
+    RoutePolicy policy = Policy(kWifi);
+    policy.pinned.push_back(Pin(L"198.51.100.0/24", kHapp));
+    policy.pinned.push_back(Pin(L"2001:db8::/32", kHapp));
+    const auto plan = RouteManager(policy).Plan(WifiOnly());
+    CHECK(plan.changes.empty());
+    CHECK(plan.warnings.size() == 2);
+}
+
+// ---- Порядок DNS: метрика в обоих семействах -------------------------------------
+
+TEST(RoutesDnsOrderRaisesOtherFamily)
+{
+    // Как у Happ: IPv4 0/0 с низкой метрикой и IPv6-интерфейс без маршрута по умолчанию,
+    // но с метрикой ниже основного — DNS уходил бы в VPN
+    auto s = WifiOnly();
+    s.interfaces[1].metric = 50;   // Wi-Fi IPv6
+    AddHapp(s);
+    s.interfaces.push_back({kHapp, AF_INET6, 5, true});
+    const RouteManager manager(Policy(kWifi));
+    const auto plan = manager.Plan(s);
+
+    const RouteChange* v4 = nullptr;
+    const RouteChange* v6 = nullptr;
+    for (const auto& c : plan.changes) {
+        if (c.kind == ChangeKind::SetInterfaceMetric && SameLuid(c.luid, kHapp)) {
+            (c.family == AF_INET ? v4 : v6) = &c;
+        }
+    }
+    CHECK(v4 && v4->newMetric == 5000);
+    CHECK(v6 && v6->newMetric == 5000 && v6->oldMetric == 5 && v6->oldAutomatic);
+    Simulate(s, plan);
+    CHECK(manager.Plan(s).changes.empty());
+}
+
+TEST(RoutesDnsOrderKeepsHigherMetric)
+{
+    // IPv6-метрика VPN и так выше основного — не трогаем
+    auto s = WifiOnly();
+    AddHapp(s);
+    s.interfaces.push_back({kHapp, AF_INET6, 100, true});
+    const auto plan = RouteManager(Policy(kWifi)).Plan(s);
+    CHECK(plan.changes.size() == 1);   // только IPv4
+}
+
 TEST(RoutesPlanIsDeterministic)
 {
     auto s = WifiOnly();

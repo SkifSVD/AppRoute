@@ -106,7 +106,92 @@ RoutePlan RouteManager::Plan(const NetworkSnapshot& snapshot) const
     RoutePlan plan;
     PlanFamily(snapshot, AF_INET, plan);
     PlanFamily(snapshot, AF_INET6, plan);
+    PlanDnsOrder(snapshot, plan);
+    PlanPinned(snapshot, AF_INET, plan);
+    PlanPinned(snapshot, AF_INET6, plan);
     return plan;
+}
+
+// Порядок DNS-серверов Windows выбирает по метрике интерфейса с учётом обоих семейств: если
+// у VPN поднята только IPv4-метрика, а IPv6-метрика осталась низкой, системный резолвер
+// продолжает спрашивать DNS этого VPN. Поэтому интерфейс, которому понижен приоритет в одном
+// семействе, понижается и в другом — если там он не уступает основному.
+void RouteManager::PlanDnsOrder(const NetworkSnapshot& snapshot, RoutePlan& plan) const
+{
+    std::vector<RouteChange> extra;
+    for (const auto& c : plan.changes) {
+        if (c.kind != ChangeKind::SetInterfaceMetric) {
+            continue;
+        }
+        const ADDRESS_FAMILY other = c.family == AF_INET ? AF_INET6 : AF_INET;
+        const auto planned = [&](const std::vector<RouteChange>& list) {
+            return std::any_of(list.begin(), list.end(), [&](const RouteChange& x) {
+                return x.kind == ChangeKind::SetInterfaceMetric && x.family == other && SameLuid(x.luid, c.luid);
+            });
+        };
+        if (planned(plan.changes) || planned(extra)) {
+            continue;
+        }
+        const auto* iface = snapshot.FindInterface(c.luid, other);
+        const auto* primary = snapshot.FindInterface(policy_.primary, other);
+        if (!primary) {
+            primary = snapshot.FindInterface(policy_.primary, c.family);
+        }
+        if (!iface || !primary || iface->metric > primary->metric) {
+            continue;
+        }
+        RouteChange change;
+        change.kind = ChangeKind::SetInterfaceMetric;
+        change.luid = c.luid;
+        change.family = other;
+        change.oldMetric = iface->metric;
+        change.oldAutomatic = iface->automatic;
+        change.newMetric = static_cast<ULONG>(std::min<ULONG64>(
+            std::max<ULONG64>(c.newMetric, static_cast<ULONG64>(primary->metric) + 100),
+            std::numeric_limits<ULONG>::max()));
+        change.description = std::format(L"{}: метрика интерфейса [{}] {}{} → {} (порядок DNS)",
+            FamilyName(other), InterfaceName(c.luid), iface->metric,
+            change.oldAutomatic ? L" (авто)" : L"", change.newMetric);
+        extra.push_back(std::move(change));
+    }
+    for (auto& c : extra) {
+        plan.changes.push_back(std::move(c));
+    }
+}
+
+// Закреплённые подсети не зависят от маршрута по умолчанию: добавляются, даже если основной
+// интерфейс пока без 0/0. Пропавший после переподключения VPN маршрут добавляется снова.
+void RouteManager::PlanPinned(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const
+{
+    std::vector<MIB_IPFORWARD_ROW2> routes;
+    for (const auto& r : snapshot.routes) {
+        if (r.DestinationPrefix.Prefix.si_family == family) {
+            routes.push_back(r);
+        }
+    }
+    for (const auto& pin : policy_.pinned) {
+        if (pin.prefix.Prefix.si_family != family) {
+            continue;
+        }
+        const bool present = std::any_of(routes.begin(), routes.end(), [&](const MIB_IPFORWARD_ROW2& r) {
+            return SameLuid(r.InterfaceLuid, pin.luid) &&
+                   r.DestinationPrefix.PrefixLength == pin.prefix.PrefixLength &&
+                   SameAddress(r.DestinationPrefix.Prefix, pin.prefix.Prefix);
+        });
+        if (present) {
+            continue;
+        }
+        if (!snapshot.FindInterface(pin.luid, family)) {
+            plan.warnings.push_back(std::format(L"{}: интерфейс [{}] недоступен — {} пока не закреплена",
+                FamilyName(family), InterfaceName(pin.luid), FormatPrefix(pin.prefix)));
+            continue;
+        }
+        RouteChange add;
+        add.kind = ChangeKind::AddRoute;
+        add.route = MakeRoute(pin.luid, pin.prefix, PickNextHop(routes, pin.luid, family), 0);
+        add.description = L"закрепить " + DescribeRoute(add.route);
+        plan.changes.push_back(std::move(add));
+    }
 }
 
 void RouteManager::PlanFamily(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const
