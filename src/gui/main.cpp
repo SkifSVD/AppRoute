@@ -21,6 +21,7 @@
 #include "core/RouteManager.h"
 #include "core/ServiceSetup.h"
 #include "core/Shortcuts.h"
+#include "core/Socks5.h"
 #include "core/Util.h"
 
 #include <commctrl.h>
@@ -144,6 +145,121 @@ void RememberRuleAdapter(const Rule& rule)
     } else if (const KnownAdapter* k = FindKnownAdapter(g.config, rule.adapter)) {
         RememberAdapter(g.config, KnownAdapter(*k));
     }
+}
+
+void WrapLabel(HWND dlg, int id);
+
+// --- цель правила: интерфейс или SOCKS5-прокси (#17) ---------------------------------------
+// В списках выбора цель — строка: "{GUID}" интерфейса или "socks5://адрес".
+
+constexpr std::wstring_view kProxyPrefix = L"socks5://";
+constexpr wchar_t kOtherProxy[] = L"socks5://?";   // пункт «Другой SOCKS5-прокси…»
+
+bool IsProxyTarget(std::wstring_view id)
+{
+    return id.starts_with(kProxyPrefix);
+}
+
+std::wstring TargetId(const Rule& rule)
+{
+    return rule.proxy.empty() ? rule.adapter : std::wstring(kProxyPrefix) + rule.proxy;
+}
+
+void SetTarget(Rule& rule, const std::wstring& id)
+{
+    if (IsProxyTarget(id)) {
+        rule.proxy = id.substr(kProxyPrefix.size());
+        rule.adapter.clear();
+    } else {
+        rule.adapter = id;
+        rule.proxy.clear();
+    }
+}
+
+std::wstring TargetLabel(const Rule& rule)
+{
+    return rule.proxy.empty() ? AdapterLabel(rule.adapter) : L"SOCKS5 " + rule.proxy;
+}
+
+// Прокси из правил — для выбора в новых правилах
+std::vector<std::wstring> KnownProxies()
+{
+    std::vector<std::wstring> out;
+    for (const Rule& r : g.config.rules) {
+        if (!r.proxy.empty() && std::find(out.begin(), out.end(), r.proxy) == out.end()) {
+            out.push_back(r.proxy);
+        }
+    }
+    return out;
+}
+
+// Состояние прокси: проверяется только локальный (ответ мгновенный, удалённый мог бы задержать окно)
+std::wstring ProxyState(const std::wstring& proxy)
+{
+    const auto address = ParseProxyAddress(proxy);
+    if (!address) {
+        return L"Неверный адрес";
+    }
+    const bool loopback = address->si_family == AF_INET
+                              ? (ntohl(address->Ipv4.sin_addr.s_addr) >> 24) == 127
+                              : IN6_IS_ADDR_LOOPBACK(&address->Ipv6.sin6_addr);
+    if (!loopback) {
+        return L"Удалённый прокси";
+    }
+    return ProxyResponds(*address, 200) ? L"Прокси отвечает" : L"Прокси не отвечает";
+}
+
+struct ProxyDialog {
+    std::wstring address;
+};
+
+INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    auto* d = reinterpret_cast<ProxyDialog*>(GetWindowLongPtrW(dlg, DWLP_USER));
+    switch (msg) {
+    case WM_INITDIALOG:
+        d = reinterpret_cast<ProxyDialog*>(lp);
+        SetWindowLongPtrW(dlg, DWLP_USER, lp);
+        SetDlgItemTextW(dlg, IDC_PROXY_ADDRESS, d->address.c_str());
+        WrapLabel(dlg, IDC_PROXY_HINT);
+        SendDlgItemMessageW(dlg, IDC_PROXY_ADDRESS, EM_SETSEL, 0, -1);
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_PROXY_ADDRESS && HIWORD(wp) == EN_CHANGE) {
+            const std::wstring text = WindowText(GetDlgItem(dlg, IDC_PROXY_ADDRESS));
+            const std::wstring state = text.empty() ? L"" : ParseProxyAddress(text) ? ProxyState(text) : L"Нужен IP-адрес и порт";
+            SetDlgItemTextW(dlg, IDC_PROXY_STATE, state.c_str());
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK) {
+            const auto address = ParseProxyAddress(WindowText(GetDlgItem(dlg, IDC_PROXY_ADDRESS)));
+            if (!address) {
+                Message(dlg, L"Адрес прокси — IP-адрес и порт, например 127.0.0.1:10808.", MB_ICONWARNING);
+                SetFocus(GetDlgItem(dlg, IDC_PROXY_ADDRESS));
+                return TRUE;
+            }
+            d->address = FormatProxyAddress(*address);
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// Спросить адрес прокси; nullopt — отмена
+std::optional<std::wstring> AskProxyAddress(HWND owner, const std::wstring& initial)
+{
+    ProxyDialog d{initial.empty() ? L"127.0.0.1:10808" : initial};
+    if (DialogBoxParamW(g.instance, MAKEINTRESOURCEW(IDD_PROXY), owner, ProxyDialogProc,
+                        reinterpret_cast<LPARAM>(&d)) != IDOK) {
+        return std::nullopt;
+    }
+    return d.address;
 }
 
 std::wstring FirstAddress(const NetAdapter& a, ADDRESS_FAMILY family)
@@ -292,6 +408,11 @@ void SetCell(int row, int column, const std::wstring& text)
 // Колонки, зависящие от состояния интерфейса (обновляются по таймеру)
 void UpdateRow(int row, const Rule& rule)
 {
+    if (!rule.proxy.empty()) {
+        SetCell(row, ColAdapter, TargetLabel(rule));
+        SetCell(row, ColState, ProxyState(rule.proxy));
+        return;
+    }
     const NetAdapter* a = AdapterByGuid(rule.adapter);
     SetCell(row, ColAdapter, AdapterLabel(rule.adapter));
     SetCell(row, ColState, AdapterState(a));
@@ -400,7 +521,8 @@ bool Save(const std::wstring& done, std::optional<size_t> select)
 struct RuleDialog {
     Rule rule;
     std::optional<size_t> index;          // правка существующего правила
-    std::vector<std::wstring> guids;      // GUID для каждого пункта списка интерфейсов
+    std::vector<std::wstring> guids;      // цель (GUID или socks5://…) для каждого пункта списка
+    int lastSelection = -1;               // для отмены выбора «Другой SOCKS5-прокси…»
 };
 
 void FillCombo(HWND dlg, int id, std::initializer_list<const wchar_t*> items, int selected)
@@ -421,7 +543,16 @@ void UpdateAdapterInfo(HWND dlg, const RuleDialog& d)
 {
     const int sel = ComboSelection(dlg, IDC_ADAPTER);
     std::wstring info;
-    if (sel >= 0 && static_cast<size_t>(sel) < d.guids.size()) {
+    const bool proxy = sel >= 0 && static_cast<size_t>(sel) < d.guids.size() && IsProxyTarget(d.guids[static_cast<size_t>(sel)]);
+    // У прокси нет «недоступного интерфейса» и своего IPv6: не отвечает — соединения не устанавливаются
+    EnableWindow(GetDlgItem(dlg, IDC_ONUNAVAIL), !proxy);
+    EnableWindow(GetDlgItem(dlg, IDC_IPV6), !proxy);
+    if (proxy) {
+        const std::wstring id = d.guids[static_cast<size_t>(sel)];
+        info = id == kOtherProxy ? L""
+                                 : ProxyState(id.substr(kProxyPrefix.size())) +
+                                       L" · TCP через прокси, имена разрешает прокси, UDP блокируется";
+    } else if (sel >= 0 && static_cast<size_t>(sel) < d.guids.size()) {
         if (const NetAdapter* a = AdapterByGuid(d.guids[static_cast<size_t>(sel)])) {
             const std::wstring v4 = FirstAddress(*a, AF_INET);
             const std::wstring v6 = FirstAddress(*a, AF_INET6);
@@ -466,11 +597,27 @@ void InitRuleDialog(HWND dlg, RuleDialog& d)
         SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
         d.guids.push_back(k.id);
     }
+    // SOCKS5-прокси (#17): из правил и «другой»
+    std::vector<std::wstring> proxies = KnownProxies();
+    if (!d.rule.proxy.empty() && std::find(proxies.begin(), proxies.end(), d.rule.proxy) == proxies.end()) {
+        proxies.push_back(d.rule.proxy);
+    }
+    for (const std::wstring& proxy : proxies) {
+        const std::wstring text = L"SOCKS5-прокси " + proxy;
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+        d.guids.push_back(std::wstring(kProxyPrefix) + proxy);
+        if (proxy == d.rule.proxy) {
+            selected = static_cast<int>(d.guids.size() - 1);
+        }
+    }
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Другой SOCKS5-прокси…"));
+    d.guids.push_back(kOtherProxy);
     SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(selected), 0);
+    d.lastSelection = selected;
 
     FillCombo(dlg, IDC_ONUNAVAIL, {L"Блокировать соединения и DNS", L"Пустить маршрутом по умолчанию"},
               d.rule.onUnavailable == OnUnavailable::Default ? 1 : 0);
-    FillCombo(dlg, IDC_DNS, {L"Через интерфейс правила", L"Системный резолвер"},
+    FillCombo(dlg, IDC_DNS, {L"Через интерфейс или прокси правила", L"Системный резолвер"},
               d.rule.dns == DnsMode::System ? 1 : 0);
     FillCombo(dlg, IDC_IPV6, {L"Как при недоступном интерфейсе", L"Блокировать", L"Маршрутом по умолчанию"},
               d.rule.ipv6 == Ipv6Mode::Block ? 1 : d.rule.ipv6 == Ipv6Mode::Default ? 2 : 0);
@@ -512,7 +659,7 @@ bool AcceptRule(HWND dlg, RuleDialog& d)
     Rule r = d.rule;
     r.app = CleanAppPath(WindowText(GetDlgItem(dlg, IDC_APP)));
     const int sel = ComboSelection(dlg, IDC_ADAPTER);
-    r.adapter = sel >= 0 && static_cast<size_t>(sel) < d.guids.size() ? d.guids[static_cast<size_t>(sel)] : L"";
+    SetTarget(r, sel >= 0 && static_cast<size_t>(sel) < d.guids.size() ? d.guids[static_cast<size_t>(sel)] : L"");
     r.onUnavailable = ComboSelection(dlg, IDC_ONUNAVAIL) == 1 ? OnUnavailable::Default : OnUnavailable::Block;
     r.dns = ComboSelection(dlg, IDC_DNS) == 1 ? DnsMode::System : DnsMode::Adapter;
     const int v6 = ComboSelection(dlg, IDC_IPV6);
@@ -553,6 +700,25 @@ INT_PTR CALLBACK RuleDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         case IDC_ADAPTER:
             if (HIWORD(wp) == CBN_SELCHANGE && d) {
+                const int sel = ComboSelection(dlg, IDC_ADAPTER);
+                if (sel >= 0 && static_cast<size_t>(sel) < d->guids.size() && d->guids[static_cast<size_t>(sel)] == kOtherProxy) {
+                    HWND combo = GetDlgItem(dlg, IDC_ADAPTER);
+                    if (const auto proxy = AskProxyAddress(dlg, L"")) {
+                        const std::wstring id = std::wstring(kProxyPrefix) + *proxy;
+                        auto existing = std::find(d->guids.begin(), d->guids.end(), id);
+                        int index = static_cast<int>(existing - d->guids.begin());
+                        if (existing == d->guids.end()) {
+                            const std::wstring text = L"SOCKS5-прокси " + *proxy;
+                            index = sel;   // перед «Другой…»
+                            SendMessageW(combo, CB_INSERTSTRING, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(text.c_str()));
+                            d->guids.insert(d->guids.begin() + index, id);
+                        }
+                        SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+                    } else {
+                        SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(d->lastSelection), 0);
+                    }
+                }
+                d->lastSelection = ComboSelection(dlg, IDC_ADAPTER);
                 UpdateAdapterInfo(dlg, *d);
             }
             return TRUE;
@@ -887,7 +1053,7 @@ INT_PTR CALLBACK WizardAppPage(HWND page, UINT msg, WPARAM wp, LPARAM lp)
 
 // Шаг 2: интерфейс
 
-enum AdapterGroup { GroupUp = 1, GroupDown, GroupKnown };
+enum AdapterGroup { GroupUp = 1, GroupDown, GroupKnown, GroupProxy };
 
 void AddGroup(HWND list, int id, const wchar_t* title)
 {
@@ -913,7 +1079,7 @@ void AddAdapterRow(HWND list, Wizard& w, int group, const std::wstring& guid, co
     ListView_SetItemText(list, row, 1, const_cast<wchar_t*>(state.c_str()));
     ListView_SetItemText(list, row, 2, const_cast<wchar_t*>(address.c_str()));
     ListView_SetItemText(list, row, 3, const_cast<wchar_t*>(description.c_str()));
-    if (EqualsIgnoreCase(guid, w.rule.adapter)) {
+    if (EqualsIgnoreCase(guid, TargetId(w.rule))) {
         ListView_SetItemState(list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(list, row, FALSE);
     }
@@ -923,7 +1089,7 @@ void FillAdapters(HWND page, Wizard& w)
 {
     LoadAdapters();
     HWND list = GetDlgItem(page, IDC_WIF_LIST);
-    if (w.rule.adapter.empty()) {
+    if (TargetId(w.rule).empty()) {
         // Последний выбранный раньше интерфейс, если он сейчас есть в системе
         for (const KnownAdapter& k : g.config.knownAdapters) {
             if (AdapterByGuid(k.id)) {
@@ -939,6 +1105,7 @@ void FillAdapters(HWND page, Wizard& w)
     AddGroup(list, GroupUp, L"Подключены");
     AddGroup(list, GroupDown, L"Не подключены");
     AddGroup(list, GroupKnown, L"Использовались раньше, сейчас нет в системе");
+    AddGroup(list, GroupProxy, L"SOCKS5-прокси");
     for (const NetAdapter* a : SortedAdapters()) {
         std::wstring address;   // у отключённых — только автоматический 169.254.x.x, он не нужен
         if (a->IsUp()) {
@@ -956,6 +1123,16 @@ void FillAdapters(HWND page, Wizard& w)
                           k.description);
         }
     }
+    std::vector<std::wstring> proxies = KnownProxies();
+    if (!w.rule.proxy.empty() && std::find(proxies.begin(), proxies.end(), w.rule.proxy) == proxies.end()) {
+        proxies.push_back(w.rule.proxy);
+    }
+    for (const std::wstring& proxy : proxies) {
+        AddAdapterRow(list, w, GroupProxy, std::wstring(kProxyPrefix) + proxy, proxy, ProxyState(proxy), L"",
+                      L"TCP через прокси, имена разрешает прокси");
+    }
+    AddAdapterRow(list, w, GroupProxy, kOtherProxy, L"Другой SOCKS5-прокси…", L"", L"",
+                  L"Например, локальный прокси клиента Xray/V2Ray без TUN");
     SendMessageW(list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(list, nullptr, TRUE);
 }
@@ -963,7 +1140,12 @@ void FillAdapters(HWND page, Wizard& w)
 void UpdateAdapterStep(HWND page, Wizard& w)
 {
     std::wstring info;
-    if (!w.rule.adapter.empty()) {
+    const std::wstring target = TargetId(w.rule);
+    if (target == kOtherProxy) {
+        info = L"Нажмите «Далее», чтобы указать адрес прокси.";
+    } else if (!w.rule.proxy.empty()) {
+        info = ProxyState(w.rule.proxy) + L" · UDP программы через прокси не передаётся и блокируется";
+    } else if (!w.rule.adapter.empty()) {
         if (const NetAdapter* a = AdapterByGuid(w.rule.adapter)) {
             const std::wstring v4 = FirstAddress(*a, AF_INET);
             const std::wstring v6 = FirstAddress(*a, AF_INET6);
@@ -974,7 +1156,7 @@ void UpdateAdapterStep(HWND page, Wizard& w)
         }
     }
     SetDlgItemTextW(page, IDC_WIF_INFO, info.c_str());
-    PropSheet_SetWizButtons(w.sheet, PSWIZB_BACK | (w.rule.adapter.empty() ? 0 : PSWIZB_NEXT));
+    PropSheet_SetWizButtons(w.sheet, PSWIZB_BACK | (target.empty() ? 0 : PSWIZB_NEXT));
 }
 
 INT_PTR CALLBACK WizardAdapterPage(HWND page, UINT msg, WPARAM, LPARAM lp)
@@ -999,14 +1181,25 @@ INT_PTR CALLBACK WizardAdapterPage(HWND page, UINT msg, WPARAM, LPARAM lp)
             if ((change->uNewState & LVIS_SELECTED) && !(change->uOldState & LVIS_SELECTED)) {
                 const auto index = static_cast<size_t>(change->lParam);
                 if (index < w->adapterGuids.size()) {
-                    w->rule.adapter = w->adapterGuids[index];
+                    SetTarget(w->rule, w->adapterGuids[index]);
                     UpdateAdapterStep(page, *w);
                 }
             }
             return TRUE;
         }
-        if (hdr->idFrom == IDC_WIF_LIST && hdr->code == NM_DBLCLK && !w->rule.adapter.empty()) {
+        if (hdr->idFrom == IDC_WIF_LIST && hdr->code == NM_DBLCLK && !TargetId(w->rule).empty()) {
             PropSheet_PressButton(w->sheet, PSBTN_NEXT);
+            return TRUE;
+        }
+        if (hdr->code == PSN_WIZNEXT && TargetId(w->rule) == kOtherProxy) {
+            // Адрес «другого» прокси — перед переходом дальше; отмена — остаёмся на шаге
+            const auto proxy = AskProxyAddress(page, L"");
+            if (!proxy) {
+                NotifyResult(page, -1);
+                return TRUE;
+            }
+            w->rule.proxy = *proxy;
+            NotifyResult(page, 0);
             return TRUE;
         }
         if (hdr->code == PSN_SETACTIVE) {
@@ -1040,10 +1233,15 @@ INT_PTR CALLBACK WizardPolicyPage(HWND page, UINT msg, WPARAM, LPARAM lp)
         }
         switch (hdr->code) {
         case PSN_SETACTIVE: {
-            const bool block = w->rule.onUnavailable == OnUnavailable::Block;
+            // Прокси не отвечает — соединения программы не устанавливаются (мимо прокси не идут)
+            const bool proxy = !w->rule.proxy.empty();
+            const bool block = proxy || w->rule.onUnavailable == OnUnavailable::Block;
             CheckRadioButton(page, IDC_WPOL_BLOCK, IDC_WPOL_DEFAULT, block ? IDC_WPOL_BLOCK : IDC_WPOL_DEFAULT);
-            const std::wstring summary = std::format(L"Программа: {}\nИнтерфейс: {}", FileNameOf(w->rule.app),
-                                                     AdapterLabel(w->rule.adapter));
+            EnableWindow(GetDlgItem(page, IDC_WPOL_DEFAULT), !proxy);
+            EnableWindow(GetDlgItem(page, IDC_WPOL_DEFAULT_TEXT), !proxy);
+            const std::wstring summary = std::format(L"Программа: {}\n{}: {}{}", FileNameOf(w->rule.app),
+                                                     proxy ? L"Цель" : L"Интерфейс", TargetLabel(w->rule),
+                                                     proxy ? L"\nЕсли прокси не отвечает, соединения программы не устанавливаются." : L"");
             SetDlgItemTextW(page, IDC_WPOL_SUMMARY, summary.c_str());
             PropSheet_SetWizButtons(w->sheet, PSWIZB_BACK | PSWIZB_FINISH);
             NotifyResult(page, 0);
@@ -1068,7 +1266,7 @@ std::optional<Rule> RunAddWizard()
     struct PageDef { int dialog; DLGPROC proc; const wchar_t* title; };
     const PageDef defs[] = {
         {IDD_WIZ_APP, WizardAppPage, L"Какую программу направить через интерфейс?"},
-        {IDD_WIZ_ADAPTER, WizardAdapterPage, L"Через какой интерфейс ей ходить в сеть?"},
+        {IDD_WIZ_ADAPTER, WizardAdapterPage, L"Через какой интерфейс или прокси ей ходить в сеть?"},
         {IDD_WIZ_POLICY, WizardPolicyPage, L"Что делать, если интерфейс недоступен?"},
     };
     HPROPSHEETPAGE pages[std::size(defs)] = {};
@@ -1797,7 +1995,7 @@ void LaunchSelected()
     }
     CloseHandle(result.process);
     SetStatus(std::format(L"Запущено: {} (PID {}{}) — трафик через «{}»", FileNameOf(result.image), result.pid,
-                          result.is32Bit ? L", 32-бит" : L"", AdapterLabel(rule.adapter)));
+                          result.is32Bit ? L", 32-бит" : L"", TargetLabel(rule)));
 }
 
 std::wstring KnownFolder(REFKNOWNFOLDERID id)

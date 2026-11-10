@@ -35,7 +35,8 @@ LaunchResult LaunchWithRule(const LaunchRequest& request)
     const wchar_t* onUnavailable = OnUnavailableEnvValue(request.policy.onUnavailable);
     const wchar_t* ipv6 = Ipv6EnvValue(request.policy.ipv6);
     EnvVars vars = {
-        {kEnvAdapter, request.adapterGuid},
+        {kEnvAdapter, request.proxy.empty() ? request.adapterGuid : std::wstring()},
+        {kEnvProxy, request.proxy},
         {kEnvLog, request.logPath},
         {kEnvChildren, request.includeChildren ? L"" : L"0"},
         {kEnvOnUnavailable, onUnavailable ? onUnavailable : L""},
@@ -114,6 +115,7 @@ LaunchRequest RequestForRule(const Rule& rule, std::wstring commandLine)
     LaunchRequest request;
     request.commandLine = std::move(commandLine);
     request.adapterGuid = rule.adapter;
+    request.proxy = rule.proxy;
     request.includeChildren = rule.includeChildren;
     request.systemDns = rule.dns == DnsMode::System;
     request.policy.onUnavailable = rule.onUnavailable;

@@ -9,6 +9,7 @@
 #define IDD_WIZ_APP         102
 #define IDD_WIZ_ADAPTER     103
 #define IDD_WIZ_POLICY      104
+#define IDD_PROXY           105
 
 // Главное окно
 #define IDC_RULES           1001
@@ -61,3 +62,8 @@
 #define IDC_WPOL_DEFAULT_TEXT 1404
 #define IDC_WPOL_SUMMARY    1405
 #define IDC_WPOL_MORE       1406
+
+// Адрес SOCKS5-прокси (#17)
+#define IDC_PROXY_HINT      1501
+#define IDC_PROXY_ADDRESS   1502
+#define IDC_PROXY_STATE     1503

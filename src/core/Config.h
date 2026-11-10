@@ -33,7 +33,8 @@ enum class Ipv6Mode { Follow, Block, Default };
 
 struct Rule {
     std::wstring app;        // полный путь (допускаются %ПЕРЕМЕННЫЕ%) или только имя файла
-    std::wstring adapter;    // GUID интерфейса, "{...}" в верхнем регистре
+    std::wstring adapter;    // GUID интерфейса, "{...}" в верхнем регистре; пусто у правила «прокси»
+    std::wstring proxy;      // SOCKS5-прокси (#17) "127.0.0.1:10808" вместо интерфейса; пусто — интерфейс
     OnUnavailable onUnavailable = OnUnavailable::Block;
     DnsMode dns = DnsMode::Adapter;
     Ipv6Mode ipv6 = Ipv6Mode::Follow;
