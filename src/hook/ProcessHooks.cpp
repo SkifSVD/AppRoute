@@ -94,6 +94,18 @@ bool ShouldInject(LPCWSTR commandLine)
 
 void InjectChild(HANDLE process, DWORD pid, const std::wstring& name)
 {
+    // Защитные границы: не внедряемся в защитное ПО / системные процессы и в процессы
+    // другого пользователя, даже если они оказались потомками (например, через оболочку).
+    const std::wstring image = GetProcessImageName(process);
+    if (IsProtectedExecutable(image.empty() ? name : image)) {
+        Log(L"дочерний процесс %lu пропущен (защищённый/системный): %ls", pid,
+            (image.empty() ? name : image).c_str());
+        return;
+    }
+    if (!ProcessUserMatchesCurrent(process)) {
+        Log(L"дочерний процесс %lu пропущен (другой пользователь): %ls", pid, name.c_str());
+        return;
+    }
     if (IsProcessWow64(process)) {
         Log(L"дочерний процесс %lu (32-бит) без правила — не поддерживается (#7): %ls", pid, name.c_str());
         return;

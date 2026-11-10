@@ -15,4 +15,4 @@ target_compile_definitions(approute_core PUBLIC
     WIN32_LEAN_AND_MEAN NOMINMAX
     _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000)
 
-target_link_libraries(approute_core PUBLIC iphlpapi ws2_32 ole32 dnsapi)
+target_link_libraries(approute_core PUBLIC iphlpapi ws2_32 ole32 dnsapi advapi32)
