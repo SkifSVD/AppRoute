@@ -4,7 +4,11 @@
 //   approute-routes plan  [--primary <интерфейс>] [--ensure-default <интерфейс>]... [--metric N]
 //   approute-routes watch [--primary <интерфейс>] [--ensure-default <интерфейс>]... [--metric N]
 //                         [--config FILE]
+//   approute-routes serve [--config FILE] [--client-sid SID]
 //
+// serve — менеджер маршрутов, запущенный из approute-gui с согласия пользователя (#15): без
+// консоли, журнал в %LOCALAPPDATA%\AppRoute\routes.log, вся политика из конфига (основной
+// интерфейс, 0/0 на интерфейсах правил, закреплённые подсети), управление — по каналу.
 // Без --primary основной интерфейс берётся из поля "primary" конфига (глобальный
 // переключатель, #14); watch перечитывает конфиг при изменении и переключается на лету.
 // <интерфейс> — ifIndex, GUID или имя (как в "Сетевых подключениях").
@@ -12,6 +16,9 @@
 // при выходе (Ctrl+C / закрытие окна). Изменения не переживают перезагрузку.
 
 #include "core/Config.h"
+#include "core/ConfigPolicy.h"
+#include "core/Json.h"
+#include "core/ManagerPipe.h"
 #include "core/NetAdapters.h"
 #include "core/PrimarySwitch.h"
 #include "core/ConflictGuard.h"
@@ -20,6 +27,7 @@
 #include "core/Util.h"
 
 #include <algorithm>
+#include <mutex>
 #include <exception>
 #include <format>
 #include <optional>
@@ -33,12 +41,14 @@ namespace {
 
 // --- вывод ----------------------------------------------------------------------------------
 
+HANDLE g_logFile = nullptr;   // serve: журнал вместо консоли
+
 void Out(std::wstring_view text)
 {
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE h = g_logFile ? g_logFile : GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD written = 0;
     DWORD mode = 0;
-    if (GetConsoleMode(h, &mode)) {
+    if (!g_logFile && GetConsoleMode(h, &mode)) {
         WriteConsoleW(h, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
         return;
     }
@@ -103,6 +113,7 @@ struct Options {
     std::vector<std::wstring> routes;   // "PREFIX=IF"
     std::optional<ULONG> metric;
     std::wstring config;                // файл правил; пусто — по умолчанию
+    std::wstring clientSid;             // serve: пользователь, которому доступен канал
 };
 
 void PrintUsage()
@@ -115,6 +126,9 @@ void PrintUsage()
     Line(L"      показать, что будет изменено (ничего не меняет)");
     Line(L"  approute-routes watch [--primary IF] [--ensure-default IF]... [--route PREFIX=IF]... [--metric N]");
     Line(L"      применить и поддерживать политику; Ctrl+C — откатить и выйти (нужны права администратора)");
+    Line(L"  approute-routes serve [--config FILE]");
+    Line(L"      менеджер маршрутов для approute-gui: без консоли, политика из конфига, журнал");
+    Line(L"      %LOCALAPPDATA%\\AppRoute\\routes.log; запускается из окна с вашего согласия");
     Line();
     Line(L"  IF — ifIndex, GUID или имя интерфейса.");
     Line(L"  --primary         через этот интерфейс идёт весь трафик; без параметра — из конфига (\"primary\",");
@@ -154,6 +168,10 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
             auto v = value();
             if (!v) return std::nullopt;
             o.routes.push_back(*v);
+        } else if (arg == L"--client-sid") {
+            auto v = value();
+            if (!v) return std::nullopt;
+            o.clientSid = *v;
         } else if (arg == L"--config") {
             auto v = value();
             if (!v) return std::nullopt;
@@ -511,6 +529,191 @@ int CmdWatch(const Options& options)
     return 0;
 }
 
+// --- serve (#15) ----------------------------------------------------------------------------
+
+std::wstring ThisDirectory()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    return path.substr(0, path.find_last_of(L'\\'));
+}
+
+// %LOCALAPPDATA%\AppRoute\routes.log, предыдущий — routes.log.1 (больше 1 МБ)
+HANDLE OpenServeLog()
+{
+    wchar_t local[MAX_PATH * 2] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, static_cast<DWORD>(std::size(local)))) {
+        return nullptr;
+    }
+    const std::wstring dir = std::wstring(local) + L"\\AppRoute";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring log = dir + L"\\routes.log";
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (GetFileAttributesExW(log.c_str(), GetFileExInfoStandard, &info) && (info.nFileSizeHigh || info.nFileSizeLow > 1024 * 1024)) {
+        MoveFileExW(log.c_str(), (log + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    const HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return h == INVALID_HANDLE_VALUE ? nullptr : h;
+}
+
+int CmdServe(const Options& options)
+{
+    g_logFile = OpenServeLog();
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: для изменения маршрутов нужны права администратора.");
+        return 2;
+    }
+    const HANDLE single = CreateMutexW(nullptr, FALSE, kRouteManagerMutex);
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        Line(std::format(L"[{}] менеджер маршрутов уже запущен — выход", Now()));
+        CloseHandle(single);
+        return 1;
+    }
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    const std::wstring configPath = ConfigPath(options);
+    Line();
+    Line(std::format(L"[{}] менеджер маршрутов запущен (PID {}), правила: {}", Now(), GetCurrentProcessId(), configPath));
+
+    // Состояние для approute-gui (запрос STATUS)
+    std::mutex statusLock;
+    std::string status = "{}";
+    const auto setStatus = [&](const RoutePolicy* policy, const std::vector<std::wstring>& notes) {
+        json::Object o;
+        o.emplace_back("pid", static_cast<double>(GetCurrentProcessId()));
+        o.emplace_back("primary", policy ? ToUtf8(InterfaceName(policy->primary)) : std::string());
+        json::Array n;
+        for (const auto& s : notes) {
+            n.emplace_back(ToUtf8(s));
+        }
+        o.emplace_back("notes", std::move(n));
+        std::lock_guard lock(statusLock);
+        status = json::Serialize(json::Value(std::move(o)));
+    };
+
+    // Канал: только approute-gui из этой папки под пользователем, который дал согласие
+    const std::wstring clientSid = options.clientSid.empty() ? CurrentUserSid() : options.clientSid;
+    ManagerPipeServer pipe(ManagerPipeName(), clientSid, ThisDirectory() + L"\\approute-gui.exe",
+                           [&](std::string_view request) -> std::string {
+                               if (request == "STOP") {
+                                   Line(std::format(L"[{}] остановка по запросу approute-gui", Now()));
+                                   SetEvent(g_stop);
+                                   return "{\"ok\":true}";
+                               }
+                               if (request == "STATUS") {
+                                   std::lock_guard lock(statusLock);
+                                   return status;
+                               }
+                               return "{\"error\":\"unknown\"}";
+                           });
+    std::wstring pipeError;
+    if (!pipe.Start(&pipeError)) {
+        // Без канала окно не сможет остановить менеджер — не запускаемся
+        Line(std::format(L"[{}] ошибка: {}", Now(), pipeError));
+        CloseHandle(single);
+        return 1;
+    }
+
+    std::optional<RouteManager> manager;
+    ConflictGuard guard;
+    std::vector<std::wstring> lastWarnings;
+    std::vector<std::wstring> lastNotes;
+    auto log = [](std::wstring_view s) { Line(s); };
+
+    // Политика из конфига; изменилась (переключатель, правила, подсети, появился VPN) —
+    // откат старой и применение новой. Конфиг не читается — действует прежняя политика.
+    auto follow = [&] {
+        try {
+            std::wstring error;
+            const auto config = LoadConfig(configPath, &error);
+            if (!config) {
+                Line(std::format(L"[{}] ⚠ конфиг не прочитан, политика не меняется: {}", Now(), error));
+                return;
+            }
+            const auto next = PolicyFromConfig(*config);
+            if (next.notes != lastNotes) {
+                for (const auto& n : next.notes) {
+                    Line(std::format(L"[{}] ⚠ {}", Now(), n));
+                }
+                lastNotes = next.notes;
+            }
+            if (!next.policy) {
+                return;
+            }
+            if (manager && SamePolicy(manager->Policy(), *next.policy)) {
+                setStatus(&manager->Policy(), next.notes);
+                return;
+            }
+            if (manager) {
+                Line(std::format(L"[{}] политика изменилась, основной интерфейс: [{}] → [{}]", Now(),
+                                 InterfaceName(manager->Policy().primary), InterfaceName(next.policy->primary)));
+                manager->Revert(log);
+            }
+            PrintPolicy(*next.policy);
+            manager.emplace(*next.policy);
+            guard = ConflictGuard{};
+            setStatus(&manager->Policy(), next.notes);
+        } catch (const std::exception& e) {
+            Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
+        }
+    };
+    auto pass = [&] {
+        if (!manager) {
+            return;
+        }
+        try {
+            const auto plan = manager->Plan();
+            if (plan.warnings != lastWarnings) {
+                PrintWarnings(plan.warnings);
+                lastWarnings = plan.warnings;
+            }
+            std::vector<std::wstring> conflicts;
+            const auto changes = guard.Filter(plan.changes, GetTickCount64(), conflicts);
+            for (const auto& message : conflicts) {
+                Line(std::format(L"[{}] ⚠ {}", Now(), message));
+            }
+            if (!changes.empty()) {
+                Line(std::format(L"[{}] исправляю маршруты:", Now()));
+                manager->Apply(changes, log);
+            }
+        } catch (const std::exception& e) {
+            Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
+        }
+    };
+
+    ChangeNotifier notifier;
+    FileChangeWatcher configWatch(configPath);
+    follow();
+    pass();
+    std::vector<HANDLE> handles = {g_stop, notifier.Event()};
+    if (configWatch.Event()) {
+        handles.push_back(configWatch.Event());
+    }
+    for (;;) {
+        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        if (w == WAIT_OBJECT_0 || WaitForSingleObject(g_stop, 300) == WAIT_OBJECT_0) {
+            break;
+        }
+        ResetEvent(notifier.Event());
+        configWatch.Rearm();
+        follow();
+        pass();
+    }
+
+    pipe.Stop();
+    Line(std::format(L"[{}] откатываю изменения…", Now()));
+    if (manager) {
+        manager->Revert(log);
+    }
+    Line(std::format(L"[{}] менеджер маршрутов остановлен", Now()));
+    CloseHandle(single);
+    SetEvent(g_done);
+    return 0;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -527,6 +730,9 @@ int wmain(int argc, wchar_t** argv)
         }
         if (options->command == L"watch") {
             return CmdWatch(*options);
+        }
+        if (options->command == L"serve") {
+            return CmdServe(*options);
         }
         if (options->command == L"plan") {
             const auto policy = BuildPolicy(*options);
