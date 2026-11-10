@@ -1,0 +1,77 @@
+// Ресурсы approute-gui. Текст в UTF-8.
+#pragma code_page(65001)
+
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+LANGUAGE LANG_RUSSIAN, SUBLANG_DEFAULT
+
+IDI_APP ICON "../../resources/approute.ico"
+
+// Главное окно: размеры и положение кнопок пересчитываются в WM_SIZE
+IDD_MAIN DIALOGEX 0, 0, 470, 230
+STYLE DS_SHELLFONT | DS_CENTER | WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
+CAPTION "AppRoute — правила программ"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_RULES, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP, 7, 7, 396, 200
+    PUSHBUTTON      "&Добавить…", IDC_ADD, 410, 7, 53, 14
+    PUSHBUTTON      "&Изменить…", IDC_EDIT, 410, 25, 53, 14
+    PUSHBUTTON      "&Удалить", IDC_REMOVE, 410, 43, 53, 14
+    PUSHBUTTON      "&Запустить", IDC_LAUNCH, 410, 67, 53, 14
+    PUSHBUTTON      "&Обновить", IDC_REFRESH, 410, 91, 53, 14
+    LTEXT           "", IDC_STATUS, 7, 213, 456, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+END
+
+IDD_RULE DIALOGEX 0, 0, 330, 186
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Правило"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "&Программа (полный путь или имя файла):", IDC_LABEL_APP, 7, 7, 316, 9
+    EDITTEXT        IDC_APP, 7, 18, 258, 13, ES_AUTOHSCROLL
+    PUSHBUTTON      "&Обзор…", IDC_BROWSE, 270, 17, 53, 14
+
+    LTEXT           "&Интерфейс:", IDC_LABEL_ADAPTER, 7, 39, 316, 9
+    COMBOBOX        IDC_ADAPTER, 7, 50, 316, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_ADAPTER_INFO, 7, 66, 316, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+
+    LTEXT           "&Если интерфейс недоступен:", IDC_LABEL_ONUNAVAIL, 7, 83, 130, 9
+    COMBOBOX        IDC_ONUNAVAIL, 140, 81, 183, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "&DNS программы:", IDC_LABEL_DNS, 7, 101, 130, 9
+    COMBOBOX        IDC_DNS, 140, 99, 183, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "IPv&6, если у интерфейса его нет:", IDC_LABEL_IPV6, 7, 119, 130, 9
+    COMBOBOX        IDC_IPV6, 140, 117, 183, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Применять к &дочерним процессам", IDC_CHILDREN, 7, 137, 316, 10
+
+    DEFPUSHBUTTON   "OK", IDOK, 216, 165, 50, 14
+    PUSHBUTTON      "Отмена", IDCANCEL, 273, 165, 50, 14
+END
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041904b0"
+        BEGIN
+            VALUE "CompanyName", "AppRoute"
+            VALUE "FileDescription", "AppRoute — маршрутизация по приложениям"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "approute-gui"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "approute-gui.exe"
+            VALUE "ProductName", "AppRoute"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x419, 1200
+    END
+END

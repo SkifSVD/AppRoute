@@ -211,12 +211,11 @@ int wmain(int argc, wchar_t** argv)
                      options->children ? L" и его дочерних процессов" : L"",
                      adapterLabel));
 
-    LaunchRequest request;
+    LaunchRequest request = rule ? RequestForRule(*rule, options->commandLine) : LaunchRequest{};
     request.commandLine = options->commandLine;
     request.adapterGuid = adapterGuid;
     request.logPath = options->log;
     request.includeChildren = options->children;
-    request.systemDns = rule && rule->dns == DnsMode::System;
     request.policy = policy;
     auto launched = LaunchWithRule(request);
     if (!launched.Ok()) {

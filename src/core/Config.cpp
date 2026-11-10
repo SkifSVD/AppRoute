@@ -402,4 +402,52 @@ Rule* FindRule(Config& config, std::wstring_view exePath)
     return FindRuleImpl(config, exePath);
 }
 
+std::optional<std::wstring> ValidateRule(const Rule& rule)
+{
+    if (rule.app.empty()) {
+        return L"Не указана программа.";
+    }
+    if (rule.app.find_first_of(L"\"<>|?*") != std::wstring::npos) {
+        return L"Путь к программе содержит недопустимые символы.";
+    }
+    if (!NormalizeGuid(rule.adapter)) {
+        return L"Не выбран интерфейс.";
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> FindDuplicateRule(const Config& config, std::wstring_view app, std::optional<size_t> except)
+{
+    const bool isPath = HasPathSeparator(app);
+    const std::wstring normalized = isPath ? NormalizePath(app) : std::wstring(app);
+    for (size_t i = 0; i < config.rules.size(); ++i) {
+        if (except && *except == i) {
+            continue;
+        }
+        const auto& other = config.rules[i].app;
+        if (HasPathSeparator(other) != isPath) {
+            continue;
+        }
+        if (EqualsIgnoreCase(isPath ? NormalizePath(other) : other, normalized)) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+std::wstring CleanAppPath(std::wstring_view input)
+{
+    auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+    while (!input.empty() && isSpace(input.front())) {
+        input.remove_prefix(1);
+    }
+    while (!input.empty() && isSpace(input.back())) {
+        input.remove_suffix(1);
+    }
+    if (input.size() >= 2 && input.front() == L'"' && input.back() == L'"') {
+        input = input.substr(1, input.size() - 2);
+    }
+    return std::wstring(input);
+}
+
 } // namespace approute
