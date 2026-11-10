@@ -1,0 +1,20 @@
+# Сборка
+/build/
+/out/
+CMakeUserPresets.json
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+*.aps
+
+# Артефакты
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
