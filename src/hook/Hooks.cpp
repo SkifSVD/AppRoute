@@ -6,6 +6,7 @@
 
 #include "Hooks.h"
 #include "AdapterResolver.h"
+#include "DnsHooks.h"
 #include "Log.h"
 #include "ProcessHooks.h"
 
@@ -398,6 +399,7 @@ void Install()
     HookApi("getsockname", &Hook_getsockname, &Real_getsockname);
     HookApi("listen", &Hook_listen, &Real_listen);
     HookApi("closesocket", &Hook_closesocket, &Real_closesocket);
+    CreateDnsHooks(g_resolver);
     CreateProcessHooks(config);
 
     const MH_STATUS st = MH_EnableHook(MH_ALL_HOOKS);

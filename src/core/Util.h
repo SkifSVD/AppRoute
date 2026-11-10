@@ -27,6 +27,9 @@ bool IsProcessElevated();
 inline bool SameLuid(NET_LUID a, NET_LUID b) { return a.Value == b.Value; }
 
 bool IsZeroAddress(const SOCKADDR_INET& addr);
+
+// addr лежит в подсети net/prefixLength (одно семейство; prefixLength 0 — false).
+bool InPrefix(const SOCKADDR_INET& addr, const SOCKADDR_INET& net, UINT8 prefixLength);
 bool SameAddress(const SOCKADDR_INET& a, const SOCKADDR_INET& b);
 
 // Сравнение строк без учёта регистра (ординальное, Unicode).

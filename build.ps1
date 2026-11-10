@@ -20,6 +20,21 @@ if (-not $cmake) {
 }
 
 $build = Join-Path $PSScriptRoot 'build'
+
+# hook-DLL может быть загружена в запущенные через AppRoute программы — перезаписать её нельзя,
+# а переименовать можно. Старые копии удаляются, когда освободятся.
+Get-ChildItem (Join-Path $build 'bin') -Recurse -Filter 'approute-hook*.dll.old-*' -ErrorAction SilentlyContinue |
+    ForEach-Object { try { [System.IO.File]::Delete($_.FullName) } catch { } }
+foreach ($dll in Get-ChildItem (Join-Path $build 'bin') -Recurse -Filter 'approute-hook*.dll' -ErrorAction SilentlyContinue) {
+    try {
+        $stream = [System.IO.File]::Open($dll.FullName, 'Open', 'ReadWrite', 'None'); $stream.Dispose()
+    } catch {
+        $old = "$($dll.FullName).old-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        [System.IO.File]::Move($dll.FullName, $old)
+        Write-Host "$($dll.Name) занята запущенной программой — переименована в $(Split-Path $old -Leaf)"
+    }
+}
+
 & $cmake -S $PSScriptRoot -B $build -A x64
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & $cmake --build $build --config $Config
