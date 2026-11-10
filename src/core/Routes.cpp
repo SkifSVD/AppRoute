@@ -24,8 +24,32 @@ bool IsDefaultRoute(const MIB_IPFORWARD_ROW2& row)
 
 bool IsSplitDefaultRoute(const MIB_IPFORWARD_ROW2& row)
 {
+    const auto& p = row.DestinationPrefix;
     // 0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1 — любой /1 покрывает половину адресного пространства
-    return row.DestinationPrefix.PrefixLength == 1;
+    if (p.PrefixLength == 1) {
+        return true;
+    }
+    if (p.Prefix.si_family != AF_INET6) {
+        return false;
+    }
+    // Весь глобальный IPv6-интернет — 2000::/3. VPN перехватывают его целиком (2000::/3, частая
+    // настройка WireGuard) или половинами 2000::/4 + 3000::/4 (OpenVPN redirect-gateway ipv6).
+    // fc00::/7 (ULA), который OpenVPN ставит вместе с ними, — не интернет: это адреса внутренних
+    // сетей, обычно самого VPN, поэтому его не трогаем.
+    const UCHAR first = p.Prefix.Ipv6.sin6_addr.u.Byte[0];
+    const bool restZero = [&] {
+        for (int i = 1; i < 16; ++i) {
+            if (p.Prefix.Ipv6.sin6_addr.u.Byte[i] != 0) {
+                return false;
+            }
+        }
+        return true;
+    }();
+    if (!restZero) {
+        return false;
+    }
+    return (p.PrefixLength == 3 && first == 0x20) ||
+           (p.PrefixLength == 4 && (first == 0x20 || first == 0x30));
 }
 
 bool SameRouteKey(const MIB_IPFORWARD_ROW2& a, const MIB_IPFORWARD_ROW2& b)

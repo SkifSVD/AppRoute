@@ -307,6 +307,113 @@ TEST(RoutesIpv6PrimaryWithoutDefaultWarns)
     CHECK(plan.warnings.size() == 1);
 }
 
+// ---- IPv6-схемы VPN (#3) ------------------------------------------------------
+
+TEST(RoutesIpv6SplitPrefixesRecognised)
+{
+    const auto split = [](const wchar_t* prefix, UINT8 length) {
+        return IsSplitDefaultRoute(Route(kOpenVpn, prefix, length, nullptr, 0));
+    };
+    CHECK(split(L"::", 1));
+    CHECK(split(L"8000::", 1));
+    CHECK(split(L"2000::", 3));
+    CHECK(split(L"2000::", 4));
+    CHECK(split(L"3000::", 4));
+    CHECK(!split(L"fc00::", 7));          // ULA — внутренние сети, не интернет
+    CHECK(!split(L"2001:db8::", 32));     // обычная подсеть
+    CHECK(!split(L"2001::", 4));          // не каноническая запись префикса
+    CHECK(!split(L"4000::", 4));
+    CHECK(!split(L"32.0.0.0", 4));        // IPv4 /4 — не расщеплённый маршрут по умолчанию
+    CHECK(split(L"128.0.0.0", 1));
+}
+
+void AddOpenVpnIpv6(NetworkSnapshot& s)
+{
+    s.routes.push_back(Route(kOpenVpn, L"2000::", 4, L"fd00::1", 0));
+    s.routes.push_back(Route(kOpenVpn, L"3000::", 4, L"fd00::1", 0));
+    s.routes.push_back(Route(kOpenVpn, L"fc00::", 7, L"fd00::1", 0));
+    s.routes.push_back(Route(kOpenVpn, L"fd00::", 64, nullptr, 0));
+    s.interfaces.push_back({kOpenVpn, AF_INET6, 25, true});
+}
+
+NetworkSnapshot WifiDualStack()
+{
+    auto s = WifiOnly();
+    s.routes.push_back(Route(kWifi, L"::", 0, L"fe80::1", 0));
+    return s;
+}
+
+// Кто обслужит глобальный IPv6-адрес: самый длинный подходящий префикс, затем метрика.
+NET_LUID Ipv6WinnerFor(const NetworkSnapshot& s, const wchar_t* address)
+{
+    const SOCKADDR_INET a = Addr(address);
+    const MIB_IPFORWARD_ROW2* best = nullptr;
+    for (const auto& r : s.routes) {
+        if (r.DestinationPrefix.Prefix.si_family != AF_INET6 ||
+            (r.DestinationPrefix.PrefixLength > 0 &&
+             !InPrefix(a, r.DestinationPrefix.Prefix, r.DestinationPrefix.PrefixLength))) {
+            continue;
+        }
+        if (!best || r.DestinationPrefix.PrefixLength > best->DestinationPrefix.PrefixLength ||
+            (r.DestinationPrefix.PrefixLength == best->DestinationPrefix.PrefixLength &&
+             s.EffectiveMetric(r) < s.EffectiveMetric(*best))) {
+            best = &r;
+        }
+    }
+    return best ? best->InterfaceLuid : NET_LUID{};
+}
+
+TEST(RoutesOpenVpnIpv6Replaced)
+{
+    auto s = WifiDualStack();
+    AddOpenVpnIpv6(s);
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"2001:db8::10"), kOpenVpn));   // до: VPN перехватил IPv6
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"3fff::10"), kOpenVpn));
+
+    const RouteManager manager(Policy(kWifi));
+    const auto plan = manager.Plan(s);
+    CHECK(Count(plan, ChangeKind::DeleteRoute) == 2);   // 2000::/4 и 3000::/4; fc00::/7 оставляем
+    const auto* add = FindChange(plan, ChangeKind::AddRoute, kOpenVpn);
+    CHECK(add && add->route.DestinationPrefix.PrefixLength == 0 &&
+          add->route.DestinationPrefix.Prefix.si_family == AF_INET6);
+    CHECK(add && SameAddress(add->route.NextHop, Addr(L"fd00::1")));
+    const auto* metric = FindChange(plan, ChangeKind::SetInterfaceMetric, kOpenVpn);
+    CHECK(metric && metric->family == AF_INET6);
+
+    Simulate(s, plan);
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"2001:db8::10"), kWifi));   // после: интернет через Wi-Fi
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"3fff::10"), kWifi));
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"fd12::5"), kOpenVpn));     // ULA-сеть VPN доступна, как была
+    CHECK(manager.Plan(s).changes.empty());
+}
+
+TEST(RoutesWireGuardIpv6Global)
+{
+    auto s = WifiDualStack();
+    s.routes.push_back(Route(kHapp, L"2000::", 3, nullptr, 0));
+    s.interfaces.push_back({kHapp, AF_INET6, 5, false});
+    const RouteManager manager(Policy(kWifi));
+    const auto plan = manager.Plan(s);
+    CHECK(Count(plan, ChangeKind::DeleteRoute) == 1);
+    CHECK(FindChange(plan, ChangeKind::AddRoute, kHapp) != nullptr);
+    Simulate(s, plan);
+    CHECK(SameLuid(Ipv6WinnerFor(s, L"2001:db8::10"), kWifi));
+    CHECK(manager.Plan(s).changes.empty());
+}
+
+TEST(RoutesGlobalSwitchToOpenVpnIpv6)
+{
+    // Основной — сам OpenVPN: его 2000::/4 + 3000::/4 считаются маршрутом по умолчанию и остаются
+    auto s = WifiDualStack();
+    AddOpenVpnIpv6(s);
+    s.routes.push_back(Route(kOpenVpn, L"0.0.0.0", 1, L"10.8.0.1", 0));
+    s.routes.push_back(Route(kOpenVpn, L"128.0.0.0", 1, L"10.8.0.1", 0));
+    s.interfaces.push_back({kOpenVpn, AF_INET, 25, true});
+    const auto plan = RouteManager(Policy(kOpenVpn)).Plan(s);
+    CHECK(plan.changes.empty());
+    CHECK(plan.warnings.empty());
+}
+
 TEST(RoutesPlanIsDeterministic)
 {
     auto s = WifiOnly();

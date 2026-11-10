@@ -16,7 +16,8 @@ std::vector<MIB_IPFORWARD_ROW2> GetRoutes(ADDRESS_FAMILY family);
 bool IsDefaultRoute(const MIB_IPFORWARD_ROW2& row);
 
 // "Расщеплённый" маршрут по умолчанию: 0.0.0.0/1 + 128.0.0.0/1 (OpenVPN redirect-gateway def1
-// и многие другие VPN). Он перекрывает /0 за счёт более длинного префикса, а не метрики.
+// и многие другие VPN), а в IPv6 ещё 2000::/3 и 2000::/4 + 3000::/4 (весь глобальный интернет).
+// Он перекрывает /0 за счёт более длинного префикса, а не метрики.
 bool IsSplitDefaultRoute(const MIB_IPFORWARD_ROW2& row);
 
 inline bool IsDefaultLikeRoute(const MIB_IPFORWARD_ROW2& row)
