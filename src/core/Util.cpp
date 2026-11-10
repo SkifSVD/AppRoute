@@ -85,6 +85,32 @@ bool IsZeroAddress(const SOCKADDR_INET& addr)
     }
 }
 
+bool InPrefix(const SOCKADDR_INET& addr, const SOCKADDR_INET& net, UINT8 prefixLength)
+{
+    if (addr.si_family != net.si_family || (addr.si_family != AF_INET && addr.si_family != AF_INET6)) {
+        return false;
+    }
+    const bool v4 = addr.si_family == AF_INET;
+    const auto* a = v4 ? reinterpret_cast<const unsigned char*>(&addr.Ipv4.sin_addr)
+                       : reinterpret_cast<const unsigned char*>(&addr.Ipv6.sin6_addr);
+    const auto* b = v4 ? reinterpret_cast<const unsigned char*>(&net.Ipv4.sin_addr)
+                       : reinterpret_cast<const unsigned char*>(&net.Ipv6.sin6_addr);
+    const unsigned maxBits = v4 ? 32u : 128u;
+    if (prefixLength == 0 || prefixLength > maxBits) {
+        return false;
+    }
+    const unsigned fullBytes = prefixLength / 8u;
+    if (std::memcmp(a, b, fullBytes) != 0) {
+        return false;
+    }
+    const unsigned restBits = prefixLength % 8u;
+    if (restBits == 0) {
+        return true;
+    }
+    const auto mask = static_cast<unsigned char>(0xFFu << (8u - restBits));
+    return (a[fullBytes] & mask) == (b[fullBytes] & mask);
+}
+
 bool SameAddress(const SOCKADDR_INET& a, const SOCKADDR_INET& b)
 {
     if (a.si_family != b.si_family) {
