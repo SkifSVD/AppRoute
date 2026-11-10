@@ -20,7 +20,8 @@ BEGIN
     PUSHBUTTON      "&Изменить…", IDC_EDIT, 410, 25, 53, 14
     PUSHBUTTON      "&Удалить", IDC_REMOVE, 410, 43, 53, 14
     PUSHBUTTON      "&Запустить", IDC_LAUNCH, 410, 67, 53, 14
-    PUSHBUTTON      "&Обновить", IDC_REFRESH, 410, 91, 53, 14
+    PUSHBUTTON      "&Ярлык…", IDC_SHORTCUT, 410, 85, 53, 14
+    PUSHBUTTON      "&Обновить", IDC_REFRESH, 410, 109, 53, 14
     LTEXT           "", IDC_STATUS, 7, 213, 456, 10, SS_ENDELLIPSIS | SS_NOPREFIX
 END
 
