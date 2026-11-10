@@ -1,5 +1,4 @@
-#Requires -Version 7
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
     Виртуальная машина Hyper-V для проверки драйвера approute-wfp.sys (#18).
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
     Проверка драйвера approute-wfp.sys внутри тестовой ВМ (#18). Windows PowerShell 5.1 от имени
     администратора:  powershell -ExecutionPolicy Bypass -File C:\AppRouteTest\Test-Driver.ps1
 

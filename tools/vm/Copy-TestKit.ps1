@@ -1,5 +1,4 @@
-#Requires -Version 7
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
     Копирует в тестовую ВМ (New-TestVm.ps1) всё для проверки драйвера: программы AppRoute из
     build\bin\Release, драйвер build\driver\approute-wfp.sys и скрипт Test-Driver.ps1 — в
