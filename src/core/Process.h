@@ -12,6 +12,8 @@ namespace approute {
 inline constexpr wchar_t kEnvAdapter[] = L"APPROUTE_ADAPTER";     // GUID интерфейса
 inline constexpr wchar_t kEnvLog[] = L"APPROUTE_LOG";             // путь к журналу (необязательно)
 inline constexpr wchar_t kEnvDns[] = L"APPROUTE_DNS";             // "system" — DNS системным резолвером
+inline constexpr wchar_t kEnvOnUnavailable[] = L"APPROUTE_ON_UNAVAILABLE"; // "default" — без интерфейса по маршруту по умолчанию
+inline constexpr wchar_t kEnvIpv6[] = L"APPROUTE_IPV6";           // "block" | "default" — IPv6 без адреса у интерфейса
 inline constexpr wchar_t kEnvChildren[] = L"APPROUTE_CHILDREN";   // "0" — не распространять на дочерние
 
 using EnvVars = std::vector<std::pair<std::wstring, std::wstring>>;

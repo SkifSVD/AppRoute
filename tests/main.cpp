@@ -2,6 +2,7 @@
 
 #include "core/Config.h"
 #include "core/Json.h"
+#include "core/Policy.h"
 #include "core/Util.h"
 
 #include <cstdio>
@@ -269,6 +270,52 @@ TEST(ConfigLoadSave)
     DeleteFileW(path.c_str());
     RemoveDirectoryW((dir + L"\\sub").c_str());
     RemoveDirectoryW(dir.c_str());
+}
+
+// ---- Политика при недоступном интерфейсе (#9) --------------------------------
+
+TEST(PolicyDefaultsToBlock)
+{
+    const UnavailablePolicy p;
+    CHECK(!p.UseDefaultRoute(false));
+    CHECK(!p.UseDefaultRoute(true));
+    CHECK(!p.UseSystemDns());
+}
+
+TEST(PolicyIpv6FollowsOnUnavailable)
+{
+    UnavailablePolicy p;
+    p.onUnavailable = OnUnavailable::Default;
+    CHECK(p.UseDefaultRoute(false));
+    CHECK(p.UseDefaultRoute(true));
+    CHECK(p.UseSystemDns());
+    p.ipv6 = Ipv6Mode::Block;
+    CHECK(p.UseDefaultRoute(false));
+    CHECK(!p.UseDefaultRoute(true));
+}
+
+TEST(PolicyIpv6OverridesBlock)
+{
+    UnavailablePolicy p;
+    p.ipv6 = Ipv6Mode::Default;   // IPv4 блокируется, IPv6 без адреса — маршрутом по умолчанию
+    CHECK(!p.UseDefaultRoute(false));
+    CHECK(p.UseDefaultRoute(true));
+    CHECK(!p.UseSystemDns());
+}
+
+TEST(PolicyEnvironmentRoundTrip)
+{
+    for (const auto on : {OnUnavailable::Block, OnUnavailable::Default}) {
+        for (const auto v6 : {Ipv6Mode::Follow, Ipv6Mode::Block, Ipv6Mode::Default}) {
+            const wchar_t* a = OnUnavailableEnvValue(on);
+            const wchar_t* b = Ipv6EnvValue(v6);
+            const auto p = ParsePolicy(a ? a : L"", b ? b : L"");
+            CHECK(p.onUnavailable == on);
+            CHECK(p.ipv6 == v6);
+        }
+    }
+    const auto junk = ParsePolicy(L"maybe", L"sometimes");   // мусор — безопасное значение
+    CHECK(junk.onUnavailable == OnUnavailable::Block && junk.ipv6 == Ipv6Mode::Follow);
 }
 
 TEST(Utf8Conversions)
