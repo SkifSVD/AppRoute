@@ -19,6 +19,8 @@ add_library(approute_core STATIC
     ManagerPipe.h   ManagerPipe.cpp
     ServiceSetup.h  ServiceSetup.cpp
     Socks5.h        Socks5.cpp
+    WfpPlan.h       WfpPlan.cpp
+    ../driver/AppRouteWfpShared.h
     Policy.h
 )
 
