@@ -7,7 +7,9 @@
 #include "Hooks.h"
 #include "AdapterResolver.h"
 #include "Log.h"
+#include "ProcessHooks.h"
 
+#include "core/Process.h"
 #include "core/Util.h"
 
 #include <MinHook.h>
@@ -16,6 +18,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace approute::hook {
@@ -359,12 +362,22 @@ void Install()
     LogInit();
 
     wchar_t guid[64] = {};
-    if (GetEnvironmentVariableW(L"APPROUTE_ADAPTER", guid, static_cast<DWORD>(std::size(guid))) == 0) {
+    if (GetEnvironmentVariableW(kEnvAdapter, guid, static_cast<DWORD>(std::size(guid))) == 0) {
         return;   // правило не задано — DLL ничего не делает
     }
     if (!g_resolver.Init(guid)) {
-        Log(L"неверный GUID интерфейса в APPROUTE_ADAPTER: %ls", guid);
+        Log(L"неверный GUID интерфейса в %ls: %ls", kEnvAdapter, guid);
         return;
+    }
+
+    RuleConfig config;
+    config.adapterGuid = guid;
+    wchar_t buffer[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(kEnvLog, buffer, MAX_PATH) != 0) {
+        config.logPath = buffer;
+    }
+    if (GetEnvironmentVariableW(kEnvChildren, buffer, MAX_PATH) != 0) {
+        config.includeChildren = std::wstring_view(buffer) != L"0";
     }
 
     wchar_t exe[MAX_PATH] = {};
@@ -385,6 +398,7 @@ void Install()
     HookApi("getsockname", &Hook_getsockname, &Real_getsockname);
     HookApi("listen", &Hook_listen, &Real_listen);
     HookApi("closesocket", &Hook_closesocket, &Real_closesocket);
+    CreateProcessHooks(config);
 
     const MH_STATUS st = MH_EnableHook(MH_ALL_HOOKS);
     if (st != MH_OK) {

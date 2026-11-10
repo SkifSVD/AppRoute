@@ -4,6 +4,7 @@ add_library(approute_core STATIC
     NetAdapters.h   NetAdapters.cpp
     Routes.h        Routes.cpp
     RouteManager.h  RouteManager.cpp
+    Process.h       Process.cpp
 )
 
 target_include_directories(approute_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
