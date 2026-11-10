@@ -1470,7 +1470,12 @@ void StartManager()
         // Служба уже установлена с согласия пользователя — запуск без UAC
         std::wstring error;
         if (!StartAppRouteService(&error)) {
-            Message(g.main, L"Не удалось запустить службу AppRoute: " + error, MB_ICONWARNING);
+            // Например, запуск запрещает антивирус: предлагаем удалить неработающую службу
+            if (Message(g.main, L"Не удалось запустить службу AppRoute: " + error +
+                                    L"\n\nУдалить службу? Менеджер маршрутов можно будет запускать из окна без неё.",
+                        MB_ICONWARNING | MB_YESNO) == IDYES) {
+                UninstallService();
+            }
             return;
         }
         for (int i = 0; i < 25 && !IsRouteManagerRunning(); ++i) {
