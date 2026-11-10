@@ -1098,6 +1098,14 @@ std::optional<Rule> RunAddWizard()
 // «Весь трафик через …»: меняет "primary" в конфиге; менеджер маршрутов (approute-routes watch)
 // подхватывает его на лету. Правила приложений работают независимо от выбора.
 
+std::vector<NET_LUID> InternetRoutes()
+{
+    try {
+        return InterfacesWithInternetRoute();
+    } catch (...) {
+        return {};
+    }
+}
 std::wstring PrimaryLabel(const std::wstring& guid)
 {
     if (guid == L"auto") {
@@ -1109,16 +1117,26 @@ std::wstring PrimaryLabel(const std::wstring& guid)
         label += L" (сейчас нет в системе)";
     } else if (!a->IsUp()) {
         label += L" (отключён)";
+    } else {
+        const auto routed = InternetRoutes();
+        if (std::none_of(routed.begin(), routed.end(), [&](NET_LUID l) { return SameLuid(l, a->luid); })) {
+            label += L" (нет выхода в интернет)";
+        }
     }
     return label;
 }
 
-// Пункты: «автоматически», подключённые интерфейсы, выбранный сейчас (даже если его нет)
+
+// Пункты: «автоматически», подключённые интерфейсы с выходом в интернет (у корпоративного VPN с
+// раздельным туннелем или виртуального коммутатора его нет — «весь трафик» через них не пустить)
+// и выбранный сейчас, даже если он недоступен
 std::vector<std::wstring> PrimaryCandidates()
 {
+    const auto routed = InternetRoutes();
     std::vector<std::wstring> out = {L"auto"};
     for (const NetAdapter* a : SortedAdapters()) {
-        if (a->IsUp()) {
+        const bool internet = std::any_of(routed.begin(), routed.end(), [&](NET_LUID l) { return SameLuid(l, a->luid); });
+        if (a->IsUp() && internet) {
             out.push_back(GuidToString(a->guid));
         }
     }
@@ -1156,7 +1174,7 @@ void UpdatePrimaryState()
         const NetAdapter* a = FindAdapter(g.adapters, *luid);
         return a ? a->alias : InterfaceName(*luid);
     };
-    const PrimaryChoice choice = ChoosePrimary(g.config.primary, g.adapters, detected);
+    const PrimaryChoice choice = ChoosePrimary(g.config.primary, g.adapters, detected, InternetRoutes());
     std::optional<NET_LUID> current;
     try {
         current = CurrentInternetInterface();

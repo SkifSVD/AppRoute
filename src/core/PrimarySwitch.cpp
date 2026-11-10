@@ -3,6 +3,7 @@
 #include "core/Routes.h"
 #include "core/Util.h"
 
+#include <algorithm>
 #include <format>
 
 namespace approute {
@@ -28,7 +29,7 @@ bool HasAddress(const NetAdapter& a)
 } // namespace
 
 PrimaryChoice ChoosePrimary(std::wstring_view configured, const std::vector<NetAdapter>& adapters,
-                            std::optional<NET_LUID> detected)
+                            std::optional<NET_LUID> detected, const std::vector<NET_LUID>& internetRoutes)
 {
     PrimaryChoice c;
     c.luid = detected;
@@ -39,14 +40,31 @@ PrimaryChoice ChoosePrimary(std::wstring_view configured, const std::vector<NetA
         return c;
     }
     const NetAdapter* a = FindAdapter(adapters, configured);
-    if (a && a->IsUp() && HasAddress(*a)) {
+    const bool routed = a && std::any_of(internetRoutes.begin(), internetRoutes.end(),
+                                         [&](NET_LUID l) { return SameLuid(l, a->luid); });
+    if (a && a->IsUp() && HasAddress(*a) && routed) {
         c.luid = a->luid;
         return c;
     }
     c.fallback = true;
+    const wchar_t* why = !a                               ? L"нет в системе"
+                         : !a->IsUp() || !HasAddress(*a) ? L"не подключён"
+                                                         : L"не ведёт в интернет (нет маршрута по умолчанию)";
     c.note = std::format(L"«{}» {} — весь трафик идёт через автоматически выбранный интерфейс",
-                         a ? a->alias : std::wstring(configured), a ? L"не подключён" : L"нет в системе");
+                         a ? a->alias : std::wstring(configured), why);
     return c;
+}
+
+std::vector<NET_LUID> InterfacesWithInternetRoute()
+{
+    std::vector<NET_LUID> out;
+    for (const auto& route : GetRoutes(AF_INET)) {
+        if (IsDefaultLikeRoute(route) &&
+            std::none_of(out.begin(), out.end(), [&](NET_LUID l) { return SameLuid(l, route.InterfaceLuid); })) {
+            out.push_back(route.InterfaceLuid);
+        }
+    }
+    return out;
 }
 
 std::optional<NET_LUID> CurrentInternetInterface()

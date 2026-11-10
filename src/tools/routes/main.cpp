@@ -187,7 +187,7 @@ std::optional<NET_LUID> PrimaryFromConfig(const Options& o, const std::vector<Ne
     } else {
         note = L"конфиг не прочитан, основной интерфейс — автоматически: " + error;
     }
-    const auto choice = ChoosePrimary(configured, adapters, DetectPrimaryInterface());
+    const auto choice = ChoosePrimary(configured, adapters, DetectPrimaryInterface(), InterfacesWithInternetRoute());
     if (!choice.note.empty()) {
         note = choice.note;
     }
