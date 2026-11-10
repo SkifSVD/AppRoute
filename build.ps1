@@ -3,10 +3,12 @@
     Сборка AppRoute. Ищет cmake в PATH, иначе берёт cmake из Visual Studio
     (включая Preview/Insiders).
     Пример: ./build.ps1 -Config Debug
+            ./build.ps1 -Test      # сборка и тесты (ctest)
 #>
 param(
     [ValidateSet('Debug', 'Release')]
-    [string]$Config = 'Release'
+    [string]$Config = 'Release',
+    [switch]$Test
 )
 $ErrorActionPreference = 'Stop'
 
@@ -38,4 +40,7 @@ foreach ($dll in Get-ChildItem (Join-Path $build 'bin') -Recurse -Filter 'approu
 & $cmake -S $PSScriptRoot -B $build -A x64
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & $cmake --build $build --config $Config
+if ($LASTEXITCODE -or -not $Test) { exit $LASTEXITCODE }
+$ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
+& $ctest --test-dir $build -C $Config --output-on-failure
 exit $LASTEXITCODE

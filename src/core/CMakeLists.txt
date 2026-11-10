@@ -6,6 +6,8 @@ add_library(approute_core STATIC
     RouteManager.h  RouteManager.cpp
     Process.h       Process.cpp
     DnsResolver.h   DnsResolver.cpp
+    Json.h          Json.cpp
+    Config.h        Config.cpp
 )
 
 target_include_directories(approute_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -15,4 +17,4 @@ target_compile_definitions(approute_core PUBLIC
     WIN32_LEAN_AND_MEAN NOMINMAX
     _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000)
 
-target_link_libraries(approute_core PUBLIC iphlpapi ws2_32 ole32 dnsapi advapi32)
+target_link_libraries(approute_core PUBLIC iphlpapi ws2_32 ole32 dnsapi advapi32 shell32)

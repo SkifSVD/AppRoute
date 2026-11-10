@@ -6,8 +6,8 @@
 
 *Per-application network interface routing for Windows 10/11.*
 
-> **Статус:** ранний прототип. Готовы консольный менеджер маршрутов и привязка TCP/UDP
-> приложений через hook-DLL (x64); DNS, конфиг и GUI — в работе
+> **Статус:** ранний прототип. Готовы консольный менеджер маршрутов, привязка TCP/UDP и DNS
+> приложений через hook-DLL (x64) и конфиг правил; GUI — в работе
 > ([план](https://github.com/SkifSVD/AppRoute/milestones)).
 
 ## Проблема
@@ -41,6 +41,7 @@ git-подмодулем.
 git clone --recurse-submodules https://github.com/SkifSVD/AppRoute.git
 ./build.ps1            # Release → build/bin/Release
 ./build.ps1 -Config Debug
+./build.ps1 -Test      # сборка и модульные тесты (ctest)
 ```
 
 ## CI
@@ -53,7 +54,11 @@ git clone --recurse-submodules https://github.com/SkifSVD/AppRoute.git
 ```powershell
 approute-run --adapter happ-xray -- "C:\Program Files\App\app.exe" --some-arg
 approute-run --adapter "Беспроводная сеть" --log C:\temp\approute.log -- curl.exe https://ifconfig.me/ip
+approute-run -- "C:\Program Files\App\app.exe"     # интерфейс — из правила в конфиге
 ```
+
+Без `--adapter` правило для программы берётся из конфига (см. `approute-config` ниже);
+`--config FILE` — другой файл конфига.
 
 Программа запускается с `approute-hook64.dll`, которая перед каждым соединением привязывает
 сокет к IP выбранного интерфейса (`connect`, `WSAConnect`, `ConnectEx`, `sendto`, `WSASendTo`,
@@ -72,6 +77,41 @@ DNS приложения тоже идёт через выбранный инт�
 же интерфейсу. Так DNS не утекает в системный резолвер, который ходит через основной канал.
 `APPROUTE_DNS=system` отключает перехват. Требуется Windows 11 (используется `DnsQueryEx` с
 пользовательскими серверами).
+
+## approute-config (правила)
+
+Правила хранятся в `%APPDATA%\AppRoute\config.json`:
+
+```json
+{
+  "version": 1,
+  "primary": "auto",
+  "rules": [
+    { "app": "C:\\Program Files\\App\\app.exe",
+      "target": { "type": "adapter", "id": "{GUID интерфейса}" },
+      "onUnavailable": "block", "dns": "adapter", "ipv6": "follow", "includeChildren": true }
+  ]
+}
+```
+
+```powershell
+approute-config add "C:\Program Files\App\app.exe" --adapter happ-xray
+approute-config add telegram.exe --adapter happ-xray --no-children   # по имени файла, в любом каталоге
+approute-config show
+approute-config remove telegram.exe
+approute-config check
+```
+
+| Поле | Значения |
+|---|---|
+| `app` | полный путь (можно с `%ПЕРЕМЕННЫМИ%`) или только имя файла; полный путь важнее имени |
+| `target.id` | GUID интерфейса — не меняется при переименовании; `add` переводит имя/ifIndex в GUID |
+| `onUnavailable` | `block` (по умолчанию) / `default` — если интерфейс отключён (применение — #9) |
+| `dns` | `adapter` (по умолчанию) / `system` |
+| `ipv6` | `follow` (как `onUnavailable`) / `block` / `default` (применение — #9) |
+| `includeChildren` | `true` (по умолчанию) / `false` |
+
+Неизвестные поля игнорируются; конфиг более новой версии не загружается, а не портится.
 
 ## approute-dns (проверка разрешения имён)
 

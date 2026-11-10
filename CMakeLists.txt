@@ -29,3 +29,7 @@ add_subdirectory(src/hook)
 add_subdirectory(src/tools/routes)
 add_subdirectory(src/tools/run)
 add_subdirectory(src/tools/dns)
+add_subdirectory(src/tools/config)
+
+enable_testing()
+add_subdirectory(tests)

@@ -124,6 +124,10 @@ std::vector<wchar_t> RuleEnvironment(const void* environment, bool unicode)
     if (!g_config.logPath.empty()) {
         vars.emplace_back(kEnvLog, g_config.logPath);
     }
+    wchar_t dns[16] = {};
+    if (GetEnvironmentVariableW(kEnvDns, dns, 16) > 0) {
+        vars.emplace_back(kEnvDns, dns);
+    }
     return MergeEnvironment(environment, unicode, vars);
 }
 

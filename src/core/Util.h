@@ -2,6 +2,7 @@
 
 #include "core/Win.h"
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -34,5 +35,9 @@ bool SameAddress(const SOCKADDR_INET& a, const SOCKADDR_INET& b);
 
 // Сравнение строк без учёта регистра (ординальное, Unicode).
 bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b);
+
+// UTF-16 ↔ UTF-8. FromUtf8 возвращает nullopt на некорректном UTF-8.
+std::string ToUtf8(std::wstring_view text);
+std::optional<std::wstring> FromUtf8(std::string_view text);
 
 } // namespace approute
