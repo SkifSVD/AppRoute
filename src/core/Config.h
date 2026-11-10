@@ -40,9 +40,20 @@ struct Rule {
     bool includeChildren = true;
 };
 
+// Интерфейс, который уже выбирали в правилах (#37): имя для показа и выбора, пока его нет в
+// системе (VPN не подключён). Поле "knownAdapters" конфига; ошибочные записи пропускаются.
+struct KnownAdapter {
+    std::wstring id;            // GUID
+    std::wstring name;          // псевдоним на момент выбора: "happ-xray"
+    std::wstring description;   // "Wintun Userspace Tunnel"
+};
+
+inline constexpr size_t kMaxKnownAdapters = 16;
+
 struct Config {
     std::wstring primary = L"auto";   // "auto" или GUID основного интерфейса
     std::vector<Rule> rules;
+    std::vector<KnownAdapter> knownAdapters;   // последние выбранные — первыми
 };
 
 // %APPDATA%\AppRoute\config.json
@@ -73,6 +84,12 @@ std::optional<std::wstring> ValidateRule(const Rule& rule);
 // кроме правила с индексом except. Для запрета дублей при добавлении и правке.
 std::optional<size_t> FindDuplicateRule(const Config& config, std::wstring_view app,
                                         std::optional<size_t> except = std::nullopt);
+
+// Запомнить интерфейс в истории: поднять наверх (обновив имя), не больше kMaxKnownAdapters.
+// id — GUID; иначе ничего не делает.
+void RememberAdapter(Config& config, KnownAdapter adapter);
+
+const KnownAdapter* FindKnownAdapter(const Config& config, std::wstring_view id);
 
 // Значение поля app из ввода пользователя: без пробелов по краям и без кавычек вокруг пути.
 std::wstring CleanAppPath(std::wstring_view input);

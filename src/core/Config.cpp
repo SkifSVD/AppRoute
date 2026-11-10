@@ -279,6 +279,21 @@ std::optional<Config> ParseConfig(std::string_view utf8, std::wstring* error)
             config.rules.push_back(std::move(rule));
         }
     }
+
+    // История интерфейсов — вспомогательные данные: ошибочные записи пропускаются, а не
+    // делают конфиг нечитаемым
+    if (const auto* known = root->Find("knownAdapters"); known && known->IsArray()) {
+        for (const auto& item : known->AsArray()) {
+            const auto text = [&](const char* key) {
+                const auto* v = item.IsObject() ? item.Find(key) : nullptr;
+                return v && v->IsString() ? FromUtf8(v->AsString()).value_or(L"") : std::wstring();
+            };
+            const auto id = NormalizeGuid(text("id"));
+            if (id && !FindKnownAdapter(config, *id) && config.knownAdapters.size() < kMaxKnownAdapters) {
+                config.knownAdapters.push_back({*id, text("name"), text("description")});
+            }
+        }
+    }
     return config;
 }
 
@@ -304,6 +319,17 @@ std::string SerializeConfig(const Config& config)
     root.emplace_back("version", kConfigVersion);
     root.emplace_back("primary", ToUtf8(config.primary));
     root.emplace_back("rules", std::move(rules));
+    if (!config.knownAdapters.empty()) {
+        json::Array known;
+        for (const auto& a : config.knownAdapters) {
+            json::Object o;
+            o.emplace_back("id", ToUtf8(a.id));
+            o.emplace_back("name", ToUtf8(a.name));
+            o.emplace_back("description", ToUtf8(a.description));
+            known.emplace_back(std::move(o));
+        }
+        root.emplace_back("knownAdapters", std::move(known));
+    }
     return json::Serialize(json::Value(std::move(root))) + "\n";
 }
 
@@ -448,6 +474,31 @@ std::wstring CleanAppPath(std::wstring_view input)
         input = input.substr(1, input.size() - 2);
     }
     return std::wstring(input);
+}
+
+void RememberAdapter(Config& config, KnownAdapter adapter)
+{
+    const auto id = NormalizeGuid(adapter.id);
+    if (!id) {
+        return;
+    }
+    adapter.id = *id;
+    auto& known = config.knownAdapters;
+    std::erase_if(known, [&](const KnownAdapter& a) { return EqualsIgnoreCase(a.id, adapter.id); });
+    known.insert(known.begin(), std::move(adapter));
+    if (known.size() > kMaxKnownAdapters) {
+        known.resize(kMaxKnownAdapters);
+    }
+}
+
+const KnownAdapter* FindKnownAdapter(const Config& config, std::wstring_view id)
+{
+    for (const auto& a : config.knownAdapters) {
+        if (EqualsIgnoreCase(a.id, id)) {
+            return &a;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace approute

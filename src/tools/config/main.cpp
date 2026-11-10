@@ -79,7 +79,11 @@ int Show(const Config& config)
     const auto adapters = EnumerateAdapters();
     const auto adapterLabel = [&](const std::wstring& guid) {
         const auto* a = FindAdapter(adapters, guid);
-        return a ? std::format(L"{} {}", a->alias, guid) : std::format(L"<нет в системе> {}", guid);
+        if (a) {
+            return std::format(L"{} {}", a->alias, guid);
+        }
+        const auto* known = FindKnownAdapter(config, guid);
+        return std::format(L"{}<нет в системе> {}", known ? known->name + L" " : L"", guid);
     };
     Line(std::format(L"Основной интерфейс: {}",
                      config.primary == L"auto" ? std::wstring(L"auto") : adapterLabel(config.primary)));
@@ -145,6 +149,7 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
         return 1;
     }
     rule.adapter = GuidToString(adapter->guid);
+    RememberAdapter(config, {rule.adapter, adapter->alias, adapter->description});
 
     bool replaced = false;
     for (auto& existing : config.rules) {
