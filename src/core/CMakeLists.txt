@@ -4,6 +4,7 @@ add_library(approute_core STATIC
     NetAdapters.h   NetAdapters.cpp
     Routes.h        Routes.cpp
     RouteManager.h  RouteManager.cpp
+    ConflictGuard.h ConflictGuard.cpp
     Process.h       Process.cpp
     DnsResolver.h   DnsResolver.cpp
     Json.h          Json.cpp

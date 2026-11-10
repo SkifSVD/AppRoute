@@ -9,6 +9,7 @@
 // при выходе (Ctrl+C / закрытие окна). Изменения не переживают перезагрузку.
 
 #include "core/NetAdapters.h"
+#include "core/ConflictGuard.h"
 #include "core/RouteManager.h"
 #include "core/Routes.h"
 #include "core/Util.h"
@@ -358,6 +359,7 @@ int CmdWatch(const RoutePolicy& policy)
 
     RouteManager manager(policy);
     ChangeNotifier notifier;
+    ConflictGuard guard;   // защита от «войны метрик» с VPN-клиентом (#2)
     std::vector<std::wstring> lastWarnings;
 
     auto log = [](std::wstring_view s) { Line(s); };
@@ -368,9 +370,14 @@ int CmdWatch(const RoutePolicy& policy)
                 PrintWarnings(plan.warnings);
                 lastWarnings = plan.warnings;
             }
-            if (!plan.changes.empty()) {
+            std::vector<std::wstring> conflicts;
+            const auto changes = guard.Filter(plan.changes, GetTickCount64(), conflicts);
+            for (const auto& message : conflicts) {
+                Line(std::format(L"[{}] ⚠ {}", Now(), message));
+            }
+            if (!changes.empty()) {
                 Line(std::format(L"[{}] исправляю маршруты:", Now()));
-                manager.Apply(plan.changes, log);
+                manager.Apply(changes, log);
             }
         } catch (const std::exception& e) {
             Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
