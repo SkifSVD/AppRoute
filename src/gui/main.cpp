@@ -1,4 +1,4 @@
-// approute-gui — главное окно AppRoute (issues #12, #37).
+// approute-gui — главное окно AppRoute (issues #12, #13, #14, #37).
 //
 // Список правил «программа → интерфейс», добавление, правка и удаление правил, выбор программы
 // и интерфейса из подключённых адаптеров, запуск программы по правилу. Правила хранятся в том же
@@ -15,6 +15,8 @@
 #include "core/InstalledApps.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
+#include "core/PrimarySwitch.h"
+#include "core/RouteManager.h"
 #include "core/Shortcuts.h"
 #include "core/Util.h"
 
@@ -40,6 +42,9 @@ namespace {
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusTimerMs = 3000;    // состояние интерфейсов меняется при (пере)подключении VPN
 constexpr UINT kMsgDpiChanged = WM_APP + 1;
+constexpr UINT kMsgTray = WM_APP + 3;
+constexpr UINT kTrayId = 1;
+const UINT kMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
 enum Column { ColProgram, ColAdapter, ColState, ColPolicy, ColPath, ColCount };
 
@@ -54,6 +59,9 @@ struct AppState {
     HIMAGELIST icons = nullptr;
     HICON bigIcon = nullptr;
     HICON smallIcon = nullptr;
+    std::vector<std::wstring> primaryGuids;   // пункты переключателя: "auto" или GUID
+    bool trayAdded = false;
+    bool trayHintShown = false;               // подсказка «AppRoute в области уведомлений»
 };
 
 AppState g;
@@ -324,9 +332,12 @@ void FillList(std::optional<size_t> select)
     UpdateButtons();
 }
 
+void FillPrimaryCombo();
+
 void RefreshStates()
 {
     LoadAdapters();
+    FillPrimaryCombo();
     const int rows = ListView_GetItemCount(g.list);
     for (int row = 0; row < rows; ++row) {
         LVITEMW it{};
@@ -365,6 +376,7 @@ void Reload(bool showErrors)
         }
     }
     FillList(keep && *keep < g.config.rules.size() ? keep : std::nullopt);
+    FillPrimaryCombo();
 }
 
 bool Save(const std::wstring& done, std::optional<size_t> select)
@@ -1081,6 +1093,253 @@ std::optional<Rule> RunAddWizard()
     return w.finished ? std::optional(w.rule) : std::nullopt;
 }
 
+// --- глобальный переключатель основного интерфейса (#14) ------------------------------------
+//
+// «Весь трафик через …»: меняет "primary" в конфиге; менеджер маршрутов (approute-routes watch)
+// подхватывает его на лету. Правила приложений работают независимо от выбора.
+
+std::wstring PrimaryLabel(const std::wstring& guid)
+{
+    if (guid == L"auto") {
+        return L"Автоматически — основное физическое подключение";
+    }
+    std::wstring label = AdapterLabel(guid);
+    const NetAdapter* a = AdapterByGuid(guid);
+    if (!a) {
+        label += L" (сейчас нет в системе)";
+    } else if (!a->IsUp()) {
+        label += L" (отключён)";
+    }
+    return label;
+}
+
+// Пункты: «автоматически», подключённые интерфейсы, выбранный сейчас (даже если его нет)
+std::vector<std::wstring> PrimaryCandidates()
+{
+    std::vector<std::wstring> out = {L"auto"};
+    for (const NetAdapter* a : SortedAdapters()) {
+        if (a->IsUp()) {
+            out.push_back(GuidToString(a->guid));
+        }
+    }
+    const std::wstring& current = g.config.primary;
+    if (current != L"auto" && std::none_of(out.begin(), out.end(), [&](const std::wstring& s) {
+            return EqualsIgnoreCase(s, current);
+        })) {
+        out.push_back(current);
+    }
+    return out;
+}
+
+int PrimaryIndex()
+{
+    for (size_t i = 0; i < g.primaryGuids.size(); ++i) {
+        if (EqualsIgnoreCase(g.primaryGuids[i], g.config.primary)) {
+            return static_cast<int>(i);
+        }
+    }
+    return 0;
+}
+
+void UpdatePrimaryState()
+{
+    std::wstring state;
+    std::optional<NET_LUID> detected;
+    try {
+        detected = DetectPrimaryInterface();
+    } catch (...) {
+    }
+    const auto name = [](std::optional<NET_LUID> luid) {
+        if (!luid) {
+            return std::wstring(L"—");
+        }
+        const NetAdapter* a = FindAdapter(g.adapters, *luid);
+        return a ? a->alias : InterfaceName(*luid);
+    };
+    const PrimaryChoice choice = ChoosePrimary(g.config.primary, g.adapters, detected);
+    std::optional<NET_LUID> current;
+    try {
+        current = CurrentInternetInterface();
+    } catch (...) {
+    }
+    const std::wstring effective = name(current);   // через какой интерфейс трафик идёт на самом деле
+    const bool running = IsRouteManagerRunning();
+    if (running) {
+        state = L"Сейчас весь трафик идёт через «" + effective + L"»";
+        if (!choice.note.empty()) {
+            state += L" · " + choice.note;
+        }
+    } else {
+        // Выбор сохранён, но маршруты никто не меняет — показываем, как есть на самом деле
+        state = std::format(L"Сейчас трафик идёт через «{}». Менеджер маршрутов не запущен — выбор "
+                            L"применится после запуска approute-routes watch (от администратора).",
+                            effective);
+    }
+
+    SetDlgItemTextW(g.main, IDC_PRIMARY_STATE, state.c_str());
+    WrapLabel(g.main, IDC_PRIMARY_STATE);
+
+    if (g.trayAdded) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = g.main;
+        nid.uID = kTrayId;
+        nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+        const std::wstring tip = L"AppRoute — весь трафик через «" + effective + L"»" +
+                                 (running ? L"" : L" (менеджер маршрутов не запущен)");
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+void FillPrimaryCombo()
+{
+    HWND combo = GetDlgItem(g.main, IDC_PRIMARY);
+    if (SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0)) {
+        return;   // список открыт — не мешаем выбору
+    }
+    auto candidates = PrimaryCandidates();
+    if (candidates != g.primaryGuids) {
+        g.primaryGuids = std::move(candidates);
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        for (const auto& guid : g.primaryGuids) {
+            const std::wstring label = PrimaryLabel(guid);
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+    }
+    SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(PrimaryIndex()), 0);
+    EnableWindow(combo, !g.readOnly);
+    UpdatePrimaryState();
+}
+
+bool Save(const std::wstring& done, std::optional<size_t> select);
+
+void SetPrimary(const std::wstring& guid)
+{
+    if (g.readOnly || EqualsIgnoreCase(guid, g.config.primary)) {
+        return;
+    }
+    g.config.primary = guid;
+    if (const NetAdapter* a = AdapterByGuid(guid)) {
+        RememberAdapter(g.config, {guid, a->alias, a->description});
+    }
+    Save(L"Весь трафик: " + (guid == L"auto" ? std::wstring(L"автоматически") : L"через «" + AdapterLabel(guid) + L"»"),
+         SelectedRule());
+    FillPrimaryCombo();
+}
+
+// Колесо мыши над закрытым списком меняет выбор — для переключателя всего трафика случайная
+// прокрутка недопустима: колесо работает только в открытом списке
+LRESULT CALLBACK NoWheelCombo(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_MOUSEWHEEL && !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0)) {
+        return 0;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+void OnPrimaryComboChanged()
+{
+    const int sel = static_cast<int>(SendDlgItemMessageW(g.main, IDC_PRIMARY, CB_GETCURSEL, 0, 0));
+    if (sel >= 0 && static_cast<size_t>(sel) < g.primaryGuids.size()) {
+        SetPrimary(g.primaryGuids[static_cast<size_t>(sel)]);
+    }
+}
+
+// --- значок в области уведомлений -----------------------------------------------------------
+
+void AddTrayIcon()
+{
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g.main;
+    nid.uID = kTrayId;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+    nid.uCallbackMessage = kMsgTray;
+    nid.hIcon = g.smallIcon;
+    wcscpy_s(nid.szTip, L"AppRoute");
+    g.trayAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+    if (g.trayAdded) {
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    }
+}
+
+void RemoveTrayIcon()
+{
+    if (!g.trayAdded) {
+        return;
+    }
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g.main;
+    nid.uID = kTrayId;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    g.trayAdded = false;
+}
+
+void ShowMain()
+{
+    ShowWindow(g.main, IsIconic(g.main) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(g.main);
+}
+
+// Закрытие окна — в трей: переключатель и правила остаются под рукой; выход — из меню значка
+void HideToTray()
+{
+    if (!g.trayAdded) {
+        DestroyWindow(g.main);
+        return;
+    }
+    ShowWindow(g.main, SW_HIDE);
+    if (!g.trayHintShown) {
+        g.trayHintShown = true;
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = g.main;
+        nid.uID = kTrayId;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        wcscpy_s(nid.szInfoTitle, L"AppRoute работает в области уведомлений");
+        wcscpy_s(nid.szInfo, L"Здесь — переключатель «весь трафик через». Выход — в меню значка.");
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+void ShowTrayMenu()
+{
+    LoadAdapters();
+    FillPrimaryCombo();
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Весь трафик через:");
+    for (size_t i = 0; i < g.primaryGuids.size(); ++i) {
+        const std::wstring label = PrimaryLabel(g.primaryGuids[i]);
+        AppendMenuW(menu, MF_STRING | (g.readOnly ? MF_GRAYED : 0), IDM_PRIMARY_FIRST + i, label.c_str());
+    }
+    if (!g.primaryGuids.empty()) {
+        CheckMenuRadioItem(menu, IDM_PRIMARY_FIRST, IDM_PRIMARY_FIRST + static_cast<UINT>(g.primaryGuids.size()) - 1,
+                           IDM_PRIMARY_FIRST + static_cast<UINT>(PrimaryIndex()), MF_BYCOMMAND);
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"&Открыть AppRoute");
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"&Выход");
+    SetMenuDefaultItem(menu, IDM_TRAY_OPEN, FALSE);
+
+    POINT pt{};
+    GetCursorPos(&pt);
+    SetForegroundWindow(g.main);   // иначе меню не закроется щелчком мимо
+    const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main,
+                                       nullptr);
+    DestroyMenu(menu);
+    if (choice == IDM_TRAY_OPEN) {
+        ShowMain();
+    } else if (choice == IDM_TRAY_EXIT) {
+        DestroyWindow(g.main);
+    } else if (choice >= IDM_PRIMARY_FIRST && choice < IDM_PRIMARY_FIRST + g.primaryGuids.size()) {
+        SetPrimary(g.primaryGuids[choice - IDM_PRIMARY_FIRST]);
+    }
+}
+
 // --- действия главного окна -----------------------------------------------------------------
 
 void AddRule()
@@ -1239,16 +1498,24 @@ void Layout()
     const int bh = u.bottom;
     const int statusH = DialogUnits(0, 0, 0, 10).bottom;
 
+    // Верхняя строка: «Весь трафик через: [список]» и под ней состояние
+    const RECT top = DialogUnits(80, 7, 200, 12);      // список: x, y, ширина, высота строки
+    const RECT stateRow = DialogUnits(0, 23, 0, 18);   // две строки
+    const int listTop = DialogUnits(0, 45, 0, 0).top;
+
     const int buttonsX = client.right - margin - bw;
     const int listW = std::max(0, buttonsX - gap * 2 - margin);
-    const int listH = std::max(0, static_cast<int>(client.bottom) - margin * 2 - statusH - gap);
+    const int listH = std::max(0, static_cast<int>(client.bottom) - listTop - margin - statusH - gap);
 
-    HDWP dwp = BeginDeferWindowPos(9);
+    HDWP dwp = BeginDeferWindowPos(12);
     auto place = [&](int id, int x, int y, int w, int h) {
         dwp = DeferWindowPos(dwp, GetDlgItem(g.main, id), nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    place(IDC_RULES, margin, margin, listW, listH);
-    int y = margin;
+    const int comboW = std::min<int>(top.right, std::max<int>(0, listW + margin - top.left));
+    place(IDC_PRIMARY, top.left, top.top, comboW, DialogUnits(0, 0, 0, 200).bottom);   // высота — с выпадающим списком
+    place(IDC_PRIMARY_STATE, margin, stateRow.top, std::max(0, static_cast<int>(client.right) - margin * 2), stateRow.bottom);
+    place(IDC_RULES, margin, listTop, listW, listH);
+    int y = listTop;
     for (int id : {IDC_ADD, IDC_EDIT, IDC_REMOVE}) {
         place(id, buttonsX, y, bw, bh);
         y += bh + gap;
@@ -1292,6 +1559,8 @@ void InitMain()
         ListView_InsertColumn(g.list, c, &col);
     }
     SetWindowIcons();
+    SetWindowSubclass(GetDlgItem(g.main, IDC_PRIMARY), NoWheelCombo, 1, 0);
+    AddTrayIcon();
     Layout();
     Reload(true);
     SetTimer(g.main, kStatusTimer, kStatusTimerMs, nullptr);
@@ -1326,6 +1595,19 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowIcons();
         FillList(SelectedRule());
         Layout();
+        return TRUE;
+    case kMsgTray:
+        // NOTIFYICON_VERSION_4: событие — в младшем слове lParam
+        switch (LOWORD(lp)) {
+        case WM_CONTEXTMENU:
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+            ShowTrayMenu();
+            break;
+        case WM_LBUTTONDBLCLK:
+            ShowMain();
+            break;
+        }
         return TRUE;
     case WM_TIMER:
         if (wp == kStatusTimer) {
@@ -1369,6 +1651,11 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_SHORTCUT:
             CreateShortcutForSelected();
             return TRUE;
+        case IDC_PRIMARY:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                OnPrimaryComboChanged();
+            }
+            return TRUE;
         case IDC_REFRESH:
             Reload(true);
             return TRUE;
@@ -1382,11 +1669,18 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_CLOSE:
-        DestroyWindow(dlg);
+        HideToTray();
         return TRUE;
     case WM_DESTROY:
         KillTimer(dlg, kStatusTimer);
+        RemoveTrayIcon();
         PostQuitMessage(0);
+        return TRUE;
+    }
+    if (msg == kMsgTaskbarCreated && msg != 0) {   // перезапуск Проводника — значок заново
+        g.trayAdded = false;
+        AddTrayIcon();
+        UpdatePrimaryState();
         return TRUE;
     }
     return FALSE;
@@ -1471,6 +1765,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (args.run) {
         return RunFromShortcut(args);
+    }
+    // Одно окно на сеанс: оно живёт в трее, повторный запуск показывает его
+    const HANDLE single = CreateMutexW(nullptr, FALSE, L"Local\\AppRoute.Gui");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (HWND existing = FindWindowW(L"#32770", L"AppRoute — правила программ")) {
+            ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
+            SetForegroundWindow(existing);
+        }
+        CloseHandle(single);
+        return 0;
     }
 
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};

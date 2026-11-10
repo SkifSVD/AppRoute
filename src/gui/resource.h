@@ -19,7 +19,13 @@
 #define IDC_REFRESH         1006
 #define IDC_STATUS          1007
 #define IDC_SHORTCUT        1008
+#define IDC_PRIMARY         1009
+#define IDC_PRIMARY_LABEL   1010
+#define IDC_PRIMARY_STATE   1011
 #define IDM_SHORTCUT_DESKTOP 1051
+#define IDM_TRAY_OPEN       1061
+#define IDM_TRAY_EXIT       1062
+#define IDM_PRIMARY_FIRST   2000   // пункты «весь трафик через» в меню трея
 #define IDM_SHORTCUT_START  1052
 
 // Диалог правила
