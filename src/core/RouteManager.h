@@ -17,8 +17,17 @@ namespace approute {
 //                    чтобы к ним можно было привязывать отдельные приложения (strong host model:
 //                    сокет, привязанный к IP интерфейса, использует только маршруты этого интерфейса).
 //   secondaryMetric — метрика интерфейса для "вторичных" интерфейсов с маршрутом по умолчанию.
+// Подсеть, закреплённая за интерфейсом: трафик в неё идёт через этот интерфейс независимо от
+// маршрута по умолчанию (более длинный префикс побеждает 0/0). Например, адреса сервиса,
+// доступного только через VPN, пока весь остальной трафик идёт напрямую.
+struct PinnedRoute {
+    IP_ADDRESS_PREFIX prefix{};
+    NET_LUID luid{};
+};
+
 struct RoutePolicy {
     NET_LUID primary{};
+    std::vector<PinnedRoute> pinned;
     std::vector<NET_LUID> ensureDefault;
     ULONG secondaryMetric = 5000;
 };
@@ -26,7 +35,7 @@ struct RoutePolicy {
 enum class ChangeKind {
     SetInterfaceMetric,   // понизить приоритет интерфейса (поднять его метрику)
     DeleteRoute,          // удалить расщеплённый маршрут 0/1 / 128/1 чужого интерфейса
-    AddRoute,             // добавить 0/0 с низким приоритетом
+    AddRoute,             // добавить 0/0 с низким приоритетом или закреплённую подсеть
 };
 
 struct RouteChange {
@@ -95,6 +104,8 @@ public:
 
 private:
     void PlanFamily(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const;
+    void PlanPinned(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const;
+    void PlanDnsOrder(const NetworkSnapshot& snapshot, RoutePlan& plan) const;
 
     RoutePolicy policy_;
     std::vector<RouteChange> journal_;

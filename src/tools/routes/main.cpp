@@ -94,6 +94,7 @@ struct Options {
     std::wstring command;
     std::optional<std::wstring> primary;
     std::vector<std::wstring> ensureDefault;
+    std::vector<std::wstring> routes;   // "PREFIX=IF"
     std::optional<ULONG> metric;
 };
 
@@ -103,14 +104,16 @@ void PrintUsage()
     Line();
     Line(L"  approute-routes list");
     Line(L"      адаптеры, маршруты по умолчанию и текущий выход в интернет");
-    Line(L"  approute-routes plan  [--primary IF] [--ensure-default IF]... [--metric N]");
+    Line(L"  approute-routes plan  [--primary IF] [--ensure-default IF]... [--route PREFIX=IF]... [--metric N]");
     Line(L"      показать, что будет изменено (ничего не меняет)");
-    Line(L"  approute-routes watch [--primary IF] [--ensure-default IF]... [--metric N]");
+    Line(L"  approute-routes watch [--primary IF] [--ensure-default IF]... [--route PREFIX=IF]... [--metric N]");
     Line(L"      применить и поддерживать политику; Ctrl+C — откатить и выйти (нужны права администратора)");
     Line();
     Line(L"  IF — ifIndex, GUID или имя интерфейса.");
     Line(L"  --primary         через этот интерфейс идёт весь трафик (по умолчанию — физический с лучшей метрикой)");
     Line(L"  --ensure-default  добавить на интерфейс маршрут 0/0 с низким приоритетом (для привязки приложений)");
+    Line(L"  --route           закрепить подсеть за интерфейсом, например 160.79.104.0/23=happ-xray:");
+    Line(L"                    трафик всех программ в эту подсеть идёт через него, остальной — как обычно");
     Line(L"  --metric          метрика для вторичных интерфейсов (по умолчанию 5000)");
 }
 
@@ -138,6 +141,10 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
             auto v = value();
             if (!v) return std::nullopt;
             o.ensureDefault.push_back(*v);
+        } else if (arg == L"--route") {
+            auto v = value();
+            if (!v) return std::nullopt;
+            o.routes.push_back(*v);
         } else if (arg == L"--metric") {
             auto v = value();
             if (!v) return std::nullopt;
@@ -178,6 +185,24 @@ std::optional<RoutePolicy> BuildPolicy(const Options& o)
             return std::nullopt;
         }
         policy.ensureDefault.push_back(a->luid);
+    }
+    for (const auto& spec : o.routes) {
+        const auto eq = spec.find(L'=');
+        const auto prefix = eq == std::wstring::npos ? std::nullopt : ParsePrefix(std::wstring_view(spec).substr(0, eq));
+        if (!prefix) {
+            Line(std::format(L"Ошибка: --route {} — ожидалось ПОДСЕТЬ=ИНТЕРФЕЙС, например 160.79.104.0/23=happ-xray", spec));
+            return std::nullopt;
+        }
+        if (prefix->PrefixLength == 0) {
+            Line(L"Ошибка: --route не для маршрута по умолчанию — используйте --primary");
+            return std::nullopt;
+        }
+        const auto* a = FindAdapter(adapters, spec.substr(eq + 1));
+        if (!a) {
+            Line(std::format(L"Ошибка: интерфейс «{}» не найден", spec.substr(eq + 1)));
+            return std::nullopt;
+        }
+        policy.pinned.push_back({*prefix, a->luid});
     }
     if (o.metric) {
         policy.secondaryMetric = *o.metric;
@@ -270,6 +295,9 @@ void PrintPolicy(const RoutePolicy& p)
     Line(std::format(L"Основной интерфейс: [{}]", InterfaceName(p.primary)));
     for (const auto& luid : p.ensureDefault) {
         Line(std::format(L"Маршрут 0/0 с низким приоритетом: [{}]", InterfaceName(luid)));
+    }
+    for (const auto& pin : p.pinned) {
+        Line(std::format(L"Подсеть {} закреплена за [{}]", FormatPrefix(pin.prefix), InterfaceName(pin.luid)));
     }
     Line(std::format(L"Метрика вторичных интерфейсов: {}", p.secondaryMetric));
 }

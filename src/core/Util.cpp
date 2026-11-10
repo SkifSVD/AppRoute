@@ -133,6 +133,52 @@ bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b)
                                 b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
 }
 
+std::optional<IP_ADDRESS_PREFIX> ParsePrefix(std::wstring_view text)
+{
+    const auto slash = text.find(L'/');
+    const std::wstring address(text.substr(0, slash));
+    IP_ADDRESS_PREFIX p{};
+    UCHAR* bytes = nullptr;
+    int maxLength = 0;
+    if (InetPtonW(AF_INET, address.c_str(), &p.Prefix.Ipv4.sin_addr) == 1) {
+        p.Prefix.si_family = AF_INET;
+        bytes = reinterpret_cast<UCHAR*>(&p.Prefix.Ipv4.sin_addr);
+        maxLength = 32;
+    } else if (InetPtonW(AF_INET6, address.c_str(), &p.Prefix.Ipv6.sin6_addr) == 1) {
+        p.Prefix.si_family = AF_INET6;
+        bytes = p.Prefix.Ipv6.sin6_addr.u.Byte;
+        maxLength = 128;
+    } else {
+        return std::nullopt;
+    }
+
+    int length = maxLength;
+    if (slash != std::wstring_view::npos) {
+        const auto digits = text.substr(slash + 1);
+        if (digits.empty() || digits.size() > 3) {
+            return std::nullopt;
+        }
+        length = 0;
+        for (const wchar_t ch : digits) {
+            if (ch < L'0' || ch > L'9') {
+                return std::nullopt;
+            }
+            length = length * 10 + (ch - L'0');
+        }
+        if (length > maxLength) {
+            return std::nullopt;
+        }
+    }
+    // Хвост адреса за пределами префикса должен быть нулевым
+    for (int bit = length; bit < maxLength; ++bit) {
+        if (bytes[bit / 8] & (0x80 >> (bit % 8))) {
+            return std::nullopt;
+        }
+    }
+    p.PrefixLength = static_cast<UINT8>(length);
+    return p;
+}
+
 std::string ToUtf8(std::wstring_view text)
 {
     if (text.empty()) {

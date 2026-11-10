@@ -36,6 +36,10 @@ bool SameAddress(const SOCKADDR_INET& a, const SOCKADDR_INET& b);
 // Сравнение строк без учёта регистра (ординальное, Unicode).
 bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b);
 
+// "160.79.104.0/23", "2607:6bc0::/48"; адрес без длины — /32 или /128. Биты адреса за
+// пределами префикса должны быть нулевыми (каноническая запись), иначе nullopt.
+std::optional<IP_ADDRESS_PREFIX> ParsePrefix(std::wstring_view text);
+
 // UTF-16 ↔ UTF-8. FromUtf8 возвращает nullopt на некорректном UTF-8.
 std::string ToUtf8(std::wstring_view text);
 std::optional<std::wstring> FromUtf8(std::string_view text);
