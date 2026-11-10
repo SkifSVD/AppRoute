@@ -66,4 +66,15 @@ Rule* FindRule(Config& config, std::wstring_view exePath);
 // "{GUID}" в каноническом виде или nullopt, если строка — не GUID.
 std::optional<std::wstring> NormalizeGuid(std::wstring_view text);
 
+// Проверка правила перед сохранением (GUI, approute-config): текст ошибки или nullopt.
+std::optional<std::wstring> ValidateRule(const Rule& rule);
+
+// Правило для той же программы, что app (полный путь — с полным путём, имя файла — с именем),
+// кроме правила с индексом except. Для запрета дублей при добавлении и правке.
+std::optional<size_t> FindDuplicateRule(const Config& config, std::wstring_view app,
+                                        std::optional<size_t> except = std::nullopt);
+
+// Значение поля app из ввода пользователя: без пробелов по краям и без кавычек вокруг пути.
+std::wstring CleanAppPath(std::wstring_view input);
+
 } // namespace approute

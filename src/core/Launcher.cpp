@@ -109,4 +109,27 @@ LaunchResult LaunchWithRule(const LaunchRequest& request)
     return result;
 }
 
+LaunchRequest RequestForRule(const Rule& rule, std::wstring commandLine)
+{
+    LaunchRequest request;
+    request.commandLine = std::move(commandLine);
+    request.adapterGuid = rule.adapter;
+    request.includeChildren = rule.includeChildren;
+    request.systemDns = rule.dns == DnsMode::System;
+    request.policy.onUnavailable = rule.onUnavailable;
+    request.policy.ipv6 = rule.ipv6;
+    return request;
+}
+
+std::wstring CommandLineForApp(std::wstring_view app)
+{
+    std::wstring path(app);
+    wchar_t expanded[MAX_PATH * 2] = {};
+    const DWORD n = ExpandEnvironmentStringsW(path.c_str(), expanded, static_cast<DWORD>(std::size(expanded)));
+    if (n > 0 && n <= std::size(expanded)) {
+        path = expanded;
+    }
+    return L"\"" + path + L"\"";
+}
+
 } // namespace approute

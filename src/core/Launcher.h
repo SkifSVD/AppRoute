@@ -44,6 +44,14 @@ struct LaunchResult {
 
 LaunchResult LaunchWithRule(const LaunchRequest& request);
 
+// Запрос на запуск по правилу конфига; commandLine — программа и аргументы. Переопределения
+// (параметры командной строки approute-run) вызывающий применяет поверх.
+LaunchRequest RequestForRule(const Rule& rule, std::wstring commandLine);
+
+// Командная строка для запуска программы правила без аргументов: %ПЕРЕМЕННЫЕ% раскрыты,
+// путь в кавычках.
+std::wstring CommandLineForApp(std::wstring_view app);
+
 // Полный путь программы из командной строки так, как её найдёт CreateProcess
 // (для поиска правила до запуска); если не найдена — первое слово как есть.
 std::wstring ResolveProgramPath(const std::wstring& commandLine);

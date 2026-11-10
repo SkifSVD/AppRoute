@@ -38,6 +38,7 @@ add_subdirectory(src/tools/routes)
 add_subdirectory(src/tools/run)
 add_subdirectory(src/tools/dns)
 add_subdirectory(src/tools/config)
+add_subdirectory(src/gui)
 
 enable_testing()
 add_subdirectory(tests)
