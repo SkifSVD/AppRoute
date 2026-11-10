@@ -40,6 +40,13 @@ foreach ($dll in Get-ChildItem (Join-Path $build 'bin') -Recurse -Filter 'approu
 & $cmake -S $PSScriptRoot -B $build -A x64
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & $cmake --build $build --config $Config
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+# x86: hook-DLL и помощник внедрения для 32-битных программ — в ту же папку bin
+$build32 = Join-Path $PSScriptRoot 'build32'
+& $cmake -S $PSScriptRoot -B $build32 -A Win32 -DAPPROUTE_HOOK_ONLY=ON "-DAPPROUTE_BIN_DIR=$(Join-Path $build 'bin')"
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+& $cmake --build $build32 --config $Config
 if ($LASTEXITCODE -or -not $Test) { exit $LASTEXITCODE }
 $ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
 & $ctest --test-dir $build -C $Config --output-on-failure

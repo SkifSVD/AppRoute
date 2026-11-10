@@ -16,8 +16,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Статический CRT: exe/dll не требуют установки VC++ Redistributable
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Все exe и dll — в одну папку: launcher ищет hook-DLL рядом с собой
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Все exe и dll обеих разрядностей — в одну папку: launcher ищет hook-DLL и помощников рядом с собой
+set(APPROUTE_BIN_DIR ${CMAKE_BINARY_DIR}/bin CACHE PATH "Папка для exe и dll")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${APPROUTE_BIN_DIR})
+
+# x86-сборка (build.ps1 делает её второй): только то, что внедряется в 32-битные процессы
+option(APPROUTE_HOOK_ONLY "Собрать только hook-DLL и помощник внедрения" OFF)
 
 if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> /permissive- /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc> /Zc:__cplusplus)
@@ -26,6 +30,10 @@ endif()
 add_subdirectory(third_party)
 add_subdirectory(src/core)
 add_subdirectory(src/hook)
+add_subdirectory(src/tools/inject)
+if(APPROUTE_HOOK_ONLY)
+    return()
+endif()
 add_subdirectory(src/tools/routes)
 add_subdirectory(src/tools/run)
 add_subdirectory(src/tools/dns)

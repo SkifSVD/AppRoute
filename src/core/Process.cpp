@@ -4,6 +4,7 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <format>
 #include <string_view>
 
 namespace approute {
@@ -140,6 +141,107 @@ DWORD InjectDll(HANDLE process, const std::wstring& dllPath, DWORD timeoutMs)
     return result;
 }
 
+std::wstring HookDllPath(const std::wstring& binDir, bool for32Bit)
+{
+    return binDir + (for32Bit ? L"approute-hook32.dll" : L"approute-hook64.dll");
+}
+
+std::wstring InjectHelperPath(const std::wstring& binDir, bool for32Bit)
+{
+    return binDir + (for32Bit ? L"approute-inject32.exe" : L"approute-inject64.exe");
+}
+
+bool IsAppRouteHelper(std::wstring_view imagePathOrName)
+{
+    const auto slash = imagePathOrName.find_last_of(L"\\/");
+    const auto name = slash == std::wstring_view::npos ? imagePathOrName : imagePathOrName.substr(slash + 1);
+    return EqualsIgnoreCase(name, L"approute-inject32.exe") || EqualsIgnoreCase(name, L"approute-inject64.exe");
+}
+
+std::wstring ModuleDirectory(const void* addressInModule)
+{
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       static_cast<LPCWSTR>(addressInModule), &module);
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(module, path, MAX_PATH);
+    std::wstring dir = path;
+    dir.resize(dir.find_last_of(L"\\/") + 1);
+    return dir;
+}
+
+namespace {
+
+DWORD InjectViaHelper(HANDLE process, const std::wstring& helper, const std::wstring& dll, DWORD timeoutMs)
+{
+    if (GetFileAttributesW(helper.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    // Помощнику — только права, нужные для внедрения, и только этот описатель
+    HANDLE inheritable = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &inheritable,
+                         PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ |
+                             PROCESS_QUERY_INFORMATION | SYNCHRONIZE,
+                         TRUE, 0)) {
+        return GetLastError();
+    }
+
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    std::vector<BYTE> buffer(size);
+    auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buffer.data());
+    DWORD rc = NO_ERROR;
+    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size) ||
+        !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inheritable,
+                                   sizeof(inheritable), nullptr, nullptr)) {
+        rc = GetLastError();
+        CloseHandle(inheritable);
+        return rc;
+    }
+
+    std::wstring cmd = std::format(L"\"{}\" --handle {:x} --dll \"{}\" --timeout {}", helper,
+                                   reinterpret_cast<ULONG_PTR>(inheritable), dll, timeoutMs);
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.lpAttributeList = attributes;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(helper.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                       EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr,
+                       &si.StartupInfo, &pi)) {
+        CloseHandle(pi.hThread);
+        if (WaitForSingleObject(pi.hProcess, timeoutMs + 5000) == WAIT_OBJECT_0) {
+            DWORD exitCode = ERROR_GEN_FAILURE;
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            rc = exitCode;
+        } else {
+            TerminateProcess(pi.hProcess, ERROR_TIMEOUT);
+            rc = ERROR_TIMEOUT;
+        }
+        CloseHandle(pi.hProcess);
+    } else {
+        rc = GetLastError();
+    }
+    DeleteProcThreadAttributeList(attributes);
+    CloseHandle(inheritable);
+    return rc;
+}
+
+} // namespace
+
+DWORD InjectRuleDll(HANDLE process, const std::wstring& binDir, DWORD timeoutMs)
+{
+    const bool target32 = IsProcessWow64(process);
+    constexpr bool self32 = sizeof(void*) == 4;
+    const std::wstring dll = HookDllPath(binDir, target32);
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return ERROR_MOD_NOT_FOUND;
+    }
+    if (target32 == self32) {
+        return InjectDll(process, dll, timeoutMs);
+    }
+    return InjectViaHelper(process, InjectHelperPath(binDir, target32), dll, timeoutMs);
+}
+
 std::vector<wchar_t> MergeEnvironment(const void* block, bool unicode, const EnvVars& vars)
 {
     auto overridden = [&](std::wstring_view entry) {
@@ -174,6 +276,9 @@ std::vector<wchar_t> MergeEnvironment(const void* block, bool unicode, const Env
     }
 
     for (const auto& [name, value] : vars) {
+        if (value.empty()) {
+            continue;   // пустое значение — удалить переменную
+        }
         const std::wstring entry = name + L"=" + value;
         out.insert(out.end(), entry.begin(), entry.end());
         out.push_back(L'\0');
