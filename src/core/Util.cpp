@@ -133,4 +133,35 @@ bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b)
                                 b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
 }
 
+std::string ToUtf8(std::wstring_view text)
+{
+    if (text.empty()) {
+        return {};
+    }
+    const int len = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(len > 0 ? len : 0), '\0');
+    if (len > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                            out.data(), len, nullptr, nullptr);
+    }
+    return out;
+}
+
+std::optional<std::wstring> FromUtf8(std::string_view text)
+{
+    if (text.empty()) {
+        return std::wstring();
+    }
+    const int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                        static_cast<int>(text.size()), nullptr, 0);
+    if (len <= 0) {
+        return std::nullopt;
+    }
+    std::wstring out(static_cast<size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()),
+                        out.data(), len);
+    return out;
+}
+
 } // namespace approute

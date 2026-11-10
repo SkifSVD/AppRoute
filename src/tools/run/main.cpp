@@ -1,11 +1,13 @@
 // approute-run — запуск программы с привязкой её трафика к выбранному интерфейсу.
 //
-//   approute-run --adapter <интерфейс> [--log <файл>] [--no-wait] -- <программа> [аргументы...]
+//   approute-run [--adapter <интерфейс>] [--config <файл>] [--log <файл>] [--no-wait] -- <программа> [аргументы...]
 //
+// Без --adapter правило для программы берётся из конфига (%APPDATA%\AppRoute\config.json, #11).
 // Программа стартует приостановленной, в неё внедряется approute-hook64.dll, затем она
 // продолжает работу. Правило передаётся через переменные окружения; дочерние процессы
 // получают его от hook-DLL (#8). Полноценный launcher (x86) — issue #7.
 
+#include "core/Config.h"
 #include "core/NetAdapters.h"
 #include "core/Process.h"
 #include "core/Util.h"
@@ -44,9 +46,11 @@ void PrintUsage()
 {
     Line(L"approute-run — запуск программы через выбранный сетевой интерфейс");
     Line(L"");
-    Line(L"  approute-run --adapter IF [--log FILE] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
+    Line(L"  approute-run [--adapter IF] [--config FILE] [--log FILE] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
     Line(L"");
-    Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list)");
+    Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list);");
+    Line(L"                 без --adapter правило берётся из конфига (см. approute-config)");
+    Line(L"  --config       файл конфига вместо %APPDATA%\\AppRoute\\config.json");
     Line(L"  --log          журнал hook-DLL (все процессы пишут в один файл)");
     Line(L"  --no-children  не применять правило к дочерним процессам");
     Line(L"  --no-wait      не ждать завершения программы");
@@ -54,6 +58,7 @@ void PrintUsage()
 
 struct Options {
     std::wstring adapter;
+    std::wstring config;
     std::wstring log;
     bool wait = true;
     bool children = true;
@@ -87,8 +92,8 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
         if (arg == L"--") {
             break;
         }
-        if ((arg == L"--adapter" || arg == L"--log") && i + 1 < argc) {
-            (arg == L"--adapter" ? o.adapter : o.log) = argv[++i];
+        if ((arg == L"--adapter" || arg == L"--log" || arg == L"--config") && i + 1 < argc) {
+            (arg == L"--adapter" ? o.adapter : arg == L"--log" ? o.log : o.config) = argv[++i];
         } else if (arg == L"--no-wait") {
             o.wait = false;
         } else if (arg == L"--no-children") {
@@ -99,11 +104,31 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
         }
     }
     auto tail = TailAfterSeparator();
-    if (i >= argc || !tail || o.adapter.empty()) {
+    if (i >= argc || !tail) {
         return std::nullopt;
     }
     o.commandLine = std::move(*tail);
     return o;
+}
+
+// Полный путь программы из командной строки — так же, как её найдёт CreateProcess
+// (для поиска правила в конфиге до запуска: правило передаётся через окружение).
+std::wstring ResolveProgram(const std::wstring& commandLine)
+{
+    std::wstring token;
+    if (!commandLine.empty() && commandLine.front() == L'"') {
+        const auto end = commandLine.find(L'"', 1);
+        token = commandLine.substr(1, end == std::wstring::npos ? std::wstring::npos : end - 1);
+    } else {
+        token = commandLine.substr(0, commandLine.find_first_of(L" \t"));
+    }
+    wchar_t full[MAX_PATH * 2] = {};
+    const DWORD n = SearchPathW(nullptr, token.c_str(), L".exe", static_cast<DWORD>(std::size(full)),
+                                full, nullptr);
+    if (n > 0 && n < std::size(full)) {
+        return full;
+    }
+    return token;
 }
 
 std::wstring HookDllPath()
@@ -119,16 +144,42 @@ std::wstring HookDllPath()
 
 int wmain(int argc, wchar_t** argv)
 {
-    const auto options = ParseArgs(argc, argv);
+    auto options = ParseArgs(argc, argv);
     if (!options) {
         PrintUsage();
         return 1;
     }
 
+    // Явный --adapter важнее конфига; без него ищем правило для программы
+    std::optional<Rule> rule;
+    if (options->adapter.empty()) {
+        const std::wstring configPath = options->config.empty() ? DefaultConfigPath() : options->config;
+        std::wstring error;
+        const auto config = LoadConfig(configPath, &error);
+        if (!config) {
+            Line(std::format(L"Ошибка конфига: {}", error));
+            return 1;
+        }
+        const std::wstring program = ResolveProgram(options->commandLine);
+        const auto* found = FindRule(*config, program);
+        if (!found) {
+            Line(std::format(L"Ошибка: нет правила для «{}» в {} — укажите --adapter или добавьте",
+                             program, configPath));
+            Line(L"правило: approute-config add PROGRAM --adapter IF");
+            return 1;
+        }
+        rule = *found;
+        options->adapter = rule->adapter;
+        if (!rule->includeChildren) {
+            options->children = false;
+        }
+    }
+
     const auto adapters = EnumerateAdapters();
     const auto* adapter = FindAdapter(adapters, options->adapter);
     if (!adapter) {
-        Line(std::format(L"Ошибка: интерфейс «{}» не найден", options->adapter));
+        Line(std::format(L"Ошибка: интерфейс «{}» не найден{}", options->adapter,
+                         rule ? L" (отключён или удалён?)" : L""));
         return 1;
     }
 
@@ -153,6 +204,9 @@ int wmain(int argc, wchar_t** argv)
     SetEnvironmentVariableW(kEnvAdapter, GuidToString(adapter->guid).c_str());
     SetEnvironmentVariableW(kEnvLog, options->log.empty() ? nullptr : options->log.c_str());
     SetEnvironmentVariableW(kEnvChildren, options->children ? nullptr : L"0");
+    if (rule && rule->dns == DnsMode::System) {
+        SetEnvironmentVariableW(kEnvDns, L"system");
+    }
 
     std::wstring commandLine = options->commandLine;
     STARTUPINFOW si{};

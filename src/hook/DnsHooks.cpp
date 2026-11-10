@@ -12,6 +12,7 @@
 
 #include "core/DnsResolver.h"
 #include "core/NetAdapters.h"
+#include "core/Process.h"
 #include "core/Util.h"
 
 #include <ws2tcpip.h>
@@ -390,7 +391,7 @@ void HookApi(const char* name, T* detour, T** original)
 void CreateDnsHooks(AdapterResolver& resolver)
 {
     wchar_t mode[16] = {};
-    if (GetEnvironmentVariableW(L"APPROUTE_DNS", mode, 16) != 0 && EqualsIgnoreCase(mode, L"system")) {
+    if (GetEnvironmentVariableW(kEnvDns, mode, 16) != 0 && EqualsIgnoreCase(mode, L"system")) {
         Log(L"DNS: системный резолвер (APPROUTE_DNS=system)");
         return;
     }

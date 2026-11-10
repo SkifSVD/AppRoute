@@ -27,8 +27,8 @@ jobs:
           submodules: true
 
       # build.ps1 сам найдёт cmake из установленной Visual Studio
-      - name: Build
-        run: ./build.ps1 -Config Release
+      - name: Build and test
+        run: ./build.ps1 -Config Release -Test
 
       - uses: actions/upload-artifact@v4
         with:
