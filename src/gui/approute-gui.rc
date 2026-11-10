@@ -38,7 +38,7 @@ BEGIN
     EDITTEXT        IDC_APP, 7, 18, 258, 13, ES_AUTOHSCROLL
     PUSHBUTTON      "&Обзор…", IDC_BROWSE, 270, 17, 53, 14
 
-    LTEXT           "&Интерфейс:", IDC_LABEL_ADAPTER, 7, 39, 316, 9
+    LTEXT           "&Интерфейс или прокси:", IDC_LABEL_ADAPTER, 7, 39, 316, 9
     COMBOBOX        IDC_ADAPTER, 7, 50, 316, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_ADAPTER_INFO, 7, 66, 316, 9, SS_ENDELLIPSIS | SS_NOPREFIX
 
@@ -71,7 +71,7 @@ IDD_WIZ_ADAPTER DIALOGEX 0, 0, 310, 170
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "Программа будет выходить в сеть только через выбранный интерфейс, остальные программы — как обычно.", IDC_WIF_HINT, 0, 0, 310, 18
+    LTEXT           "Программа будет выходить в сеть только через выбранный интерфейс или прокси, остальные программы — как обычно.", IDC_WIF_HINT, 0, 0, 310, 18
     CONTROL         "", IDC_WIF_LIST, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 0, 21, 310, 128
     LTEXT           "", IDC_WIF_INFO, 0, 153, 310, 9, SS_ENDELLIPSIS | SS_NOPREFIX
 END
@@ -88,6 +88,19 @@ BEGIN
     LTEXT           "Пока интерфейс не подключён, программа работает как без AppRoute. Когда он появится, новые соединения пойдут через него.", IDC_WPOL_DEFAULT_TEXT, 12, 50, 298, 18
     LTEXT           "", IDC_WPOL_SUMMARY, 0, 84, 310, 28, SS_NOPREFIX
     LTEXT           "DNS, IPv6 и дочерние процессы получат настройки по умолчанию; поменять их можно потом кнопкой «Изменить…».", IDC_WPOL_MORE, 0, 146, 310, 18
+END
+
+// Адрес SOCKS5-прокси (#17)
+IDD_PROXY DIALOGEX 0, 0, 260, 96
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "SOCKS5-прокси"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Адрес и порт прокси, например 127.0.0.1:10808 — локальный прокси клиента Xray/V2Ray. Нужен IP-адрес; прокси — без пароля.", IDC_PROXY_HINT, 7, 7, 246, 27
+    EDITTEXT        IDC_PROXY_ADDRESS, 7, 38, 246, 13, ES_AUTOHSCROLL
+    LTEXT           "", IDC_PROXY_STATE, 7, 56, 246, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    DEFPUSHBUTTON   "OK", IDOK, 146, 75, 50, 14
+    PUSHBUTTON      "Отмена", IDCANCEL, 203, 75, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO

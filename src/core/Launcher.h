@@ -15,6 +15,7 @@ namespace approute {
 struct LaunchRequest {
     std::wstring commandLine;          // программа и аргументы, как в CreateProcess
     std::wstring adapterGuid;          // "{GUID}" интерфейса правила
+    std::wstring proxy;                // или SOCKS5-прокси "127.0.0.1:10808" (#17)
     std::wstring logPath;              // журнал hook-DLL; пусто — без журнала
     bool includeChildren = true;
     bool systemDns = false;            // dns: system

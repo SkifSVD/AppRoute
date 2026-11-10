@@ -1,12 +1,13 @@
 // approute-config — правила AppRoute в конфиге (%APPDATA%\AppRoute\config.json, issue #11).
 //
 //   approute-config [--config FILE] path | show | check
-//   approute-config [--config FILE] add PROGRAM --adapter IF [--on-unavailable block|default]
+//   approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [--on-unavailable block|default]
 //                   [--dns adapter|system] [--ipv6 follow|block|default] [--no-children]
 //   approute-config [--config FILE] remove PROGRAM
 
 #include "core/Config.h"
 #include "core/NetAdapters.h"
+#include "core/Socks5.h"
 #include "core/Util.h"
 
 #include <format>
@@ -45,11 +46,12 @@ void PrintUsage()
     Line(L"  approute-config [--config FILE] path              путь к файлу конфига");
     Line(L"  approute-config [--config FILE] show              список правил");
     Line(L"  approute-config [--config FILE] check             проверить конфиг");
-    Line(L"  approute-config [--config FILE] add PROGRAM --adapter IF [параметры]");
+    Line(L"  approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [параметры]");
     Line(L"  approute-config [--config FILE] remove PROGRAM");
     Line(L"");
     Line(L"  PROGRAM            путь к программе или только имя файла (подходит в любом каталоге)");
     Line(L"  --adapter IF       ifIndex, GUID или имя интерфейса; в конфиг пишется GUID");
+    Line(L"  --proxy ADDR       вместо интерфейса — SOCKS5-прокси, например 127.0.0.1:10808");
     Line(L"  --on-unavailable   block (по умолчанию) | default — если интерфейс отключён");
     Line(L"  --dns              adapter (по умолчанию) | system");
     Line(L"  --ipv6             follow (по умолчанию) | block | default");
@@ -93,7 +95,7 @@ int Show(const Config& config)
     }
     for (const auto& rule : config.rules) {
         Line(std::format(L"{}", rule.app));
-        Line(std::format(L"    → {}", adapterLabel(rule.adapter)));
+        Line(std::format(L"    → {}", rule.proxy.empty() ? adapterLabel(rule.adapter) : L"SOCKS5-прокси " + rule.proxy));
         Line(std::format(L"    onUnavailable={} dns={} ipv6={} includeChildren={}", Name(rule.onUnavailable),
                          Name(rule.dns), Name(rule.ipv6), rule.includeChildren ? L"true" : L"false"));
     }
@@ -109,11 +111,14 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
     Rule rule;
     rule.app = RuleApp(args[0]);
     std::wstring adapterArg;
+    std::wstring proxyArg;
     for (size_t i = 1; i < args.size(); ++i) {
         const std::wstring& arg = args[i];
         const bool hasValue = i + 1 < args.size();
         if (arg == L"--adapter" && hasValue) {
             adapterArg = args[++i];
+        } else if (arg == L"--proxy" && hasValue) {
+            proxyArg = args[++i];
         } else if (arg == L"--on-unavailable" && hasValue) {
             const auto& v = args[++i];
             if (v == L"block") rule.onUnavailable = OnUnavailable::Block;
@@ -137,19 +142,31 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
             return 1;
         }
     }
-    if (adapterArg.empty()) {
-        Line(L"Ошибка: укажите --adapter IF");
+    if (adapterArg.empty() == proxyArg.empty()) {
+        Line(L"Ошибка: укажите --adapter IF или --proxy ADDR");
         return 1;
     }
-    // Интерфейс должен существовать сейчас: так имя/ifIndex надёжно превращаются в GUID
-    const auto adapters = EnumerateAdapters();
-    const auto* adapter = FindAdapter(adapters, adapterArg);
-    if (!adapter) {
-        Line(std::format(L"Ошибка: интерфейс «{}» не найден (см. approute-routes list)", adapterArg));
-        return 1;
+    std::wstring target;
+    if (!proxyArg.empty()) {
+        const auto address = ParseProxyAddress(proxyArg);
+        if (!address) {
+            Line(std::format(L"Ошибка: адрес прокси «{}» — нужен IP-адрес и порт, например 127.0.0.1:10808", proxyArg));
+            return 1;
+        }
+        rule.proxy = FormatProxyAddress(*address);
+        target = L"SOCKS5-прокси " + rule.proxy;
+    } else {
+        // Интерфейс должен существовать сейчас: так имя/ifIndex надёжно превращаются в GUID
+        const auto adapters = EnumerateAdapters();
+        const auto* adapter = FindAdapter(adapters, adapterArg);
+        if (!adapter) {
+            Line(std::format(L"Ошибка: интерфейс «{}» не найден (см. approute-routes list)", adapterArg));
+            return 1;
+        }
+        rule.adapter = GuidToString(adapter->guid);
+        RememberAdapter(config, {rule.adapter, adapter->alias, adapter->description});
+        target = adapter->alias;
     }
-    rule.adapter = GuidToString(adapter->guid);
-    RememberAdapter(config, {rule.adapter, adapter->alias, adapter->description});
 
     bool replaced = false;
     for (auto& existing : config.rules) {
@@ -166,8 +183,7 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
         Line(std::format(L"Ошибка записи: {}", error));
         return 1;
     }
-    Line(std::format(L"{}: {} → {}", replaced ? L"Правило обновлено" : L"Правило добавлено", rule.app,
-                     adapter->alias));
+    Line(std::format(L"{}: {} → {}", replaced ? L"Правило обновлено" : L"Правило добавлено", rule.app, target));
     return 0;
 }
 

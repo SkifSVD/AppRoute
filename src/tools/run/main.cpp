@@ -1,6 +1,6 @@
 // approute-run — запуск программы с привязкой её трафика к выбранному интерфейсу.
 //
-//   approute-run [--adapter <интерфейс>] [--config <файл>] [--log <файл>] [--no-wait] -- <программа> [аргументы...]
+//   approute-run [--adapter <интерфейс> | --proxy <адрес>] [--config <файл>] [--log <файл>] [--no-wait] -- <программа> [аргументы...]
 //
 // Без --adapter правило для программы берётся из конфига (%APPDATA%\AppRoute\config.json, #11).
 // Программа стартует приостановленной, в неё внедряется approute-hook64.dll, затем она
@@ -10,6 +10,7 @@
 #include "core/Config.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
+#include "core/Socks5.h"
 #include "core/Policy.h"
 #include "core/Process.h"
 #include "core/Util.h"
@@ -48,11 +49,13 @@ void PrintUsage()
 {
     Line(L"approute-run — запуск программы через выбранный сетевой интерфейс");
     Line(L"");
-    Line(L"  approute-run [--adapter IF] [--config FILE] [--log FILE] [--on-unavailable block|default]");
+    Line(L"  approute-run [--adapter IF | --proxy ADDR] [--config FILE] [--log FILE] [--on-unavailable block|default]");
     Line(L"               [--ipv6 follow|block|default] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
     Line(L"");
     Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list);");
     Line(L"                 без --adapter правило берётся из конфига (см. approute-config)");
+    Line(L"  --proxy        вместо интерфейса — SOCKS5-прокси, например 127.0.0.1:10808: TCP идёт через");
+    Line(L"                 него, имена разрешает прокси, UDP блокируется (локальные адреса — напрямую)");
     Line(L"  --config       файл конфига вместо %APPDATA%\\AppRoute\\config.json");
     Line(L"  --log          журнал hook-DLL (все процессы пишут в один файл)");
     Line(L"  --on-unavailable  если у интерфейса нет адреса (VPN отключён): block — блокировать");
@@ -64,6 +67,7 @@ void PrintUsage()
 
 struct Options {
     std::wstring adapter;
+    std::wstring proxy;
     std::wstring config;
     std::wstring log;
     bool wait = true;
@@ -100,8 +104,8 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
         if (arg == L"--") {
             break;
         }
-        if ((arg == L"--adapter" || arg == L"--log" || arg == L"--config") && i + 1 < argc) {
-            (arg == L"--adapter" ? o.adapter : arg == L"--log" ? o.log : o.config) = argv[++i];
+        if ((arg == L"--adapter" || arg == L"--log" || arg == L"--config" || arg == L"--proxy") && i + 1 < argc) {
+            (arg == L"--adapter" ? o.adapter : arg == L"--log" ? o.log : arg == L"--proxy" ? o.proxy : o.config) = argv[++i];
         } else if (arg == L"--on-unavailable" && i + 1 < argc) {
             const std::wstring_view v = argv[++i];
             if (v != L"block" && v != L"default") {
@@ -147,7 +151,7 @@ int wmain(int argc, wchar_t** argv)
 
     // Явный --adapter важнее конфига; без него ищем правило для программы
     std::optional<Rule> rule;
-    if (options->adapter.empty()) {
+    if (options->adapter.empty() && options->proxy.empty()) {
         const std::wstring configPath = options->config.empty() ? DefaultConfigPath() : options->config;
         std::wstring error;
         const auto config = LoadConfig(configPath, &error);
@@ -165,6 +169,7 @@ int wmain(int argc, wchar_t** argv)
         }
         rule = *found;
         options->adapter = rule->adapter;
+        options->proxy = rule->proxy;
         if (!rule->includeChildren) {
             options->children = false;
         }
@@ -178,6 +183,39 @@ int wmain(int argc, wchar_t** argv)
     }
     policy.onUnavailable = options->onUnavailable.value_or(policy.onUnavailable);
     policy.ipv6 = options->ipv6.value_or(policy.ipv6);
+
+    if (!options->proxy.empty()) {
+        // Правило «прокси» (#17)
+        const auto address = ParseProxyAddress(options->proxy);
+        if (!address) {
+            Line(std::format(L"Ошибка: адрес прокси «{}» — нужен IP-адрес и порт, например 127.0.0.1:10808",
+                             options->proxy));
+            return 1;
+        }
+        Line(std::format(L"AppRoute: TCP-трафик «{}»{} идёт через SOCKS5-прокси {}; имена разрешает прокси, UDP "
+                         L"блокируется.",
+                         options->commandLine, options->children ? L" и его дочерних процессов" : L"",
+                         FormatProxyAddress(*address)));
+        LaunchRequest request = rule ? RequestForRule(*rule, options->commandLine) : LaunchRequest{};
+        request.commandLine = options->commandLine;
+        request.adapterGuid.clear();
+        request.proxy = FormatProxyAddress(*address);
+        request.logPath = options->log;
+        request.includeChildren = options->children;
+        request.policy = policy;
+        auto launched = LaunchWithRule(request);
+        if (!launched.Ok()) {
+            Line(launched.message);
+            return 1;
+        }
+        DWORD exitCode = 0;
+        if (options->wait) {
+            WaitForSingleObject(launched.process, INFINITE);
+            GetExitCodeProcess(launched.process, &exitCode);
+        }
+        CloseHandle(launched.process);
+        return static_cast<int>(exitCode);
+    }
 
     // Интерфейс, заданный GUID, может быть сейчас отключён (VPN не подключён) — это не ошибка:
     // hook-DLL применит политику и подхватит интерфейс, когда он появится.

@@ -7,6 +7,7 @@ namespace approute::hook {
 // Правило текущего процесса — то же получат дочерние.
 struct RuleConfig {
     std::wstring adapterGuid;
+    std::wstring proxy;   // SOCKS5-прокси вместо интерфейса (#17)
     std::wstring logPath;
     bool includeChildren = true;
 };

@@ -1,3 +1,4 @@
+#include "core/Socks5.h"
 #include "core/Config.h"
 
 #include "core/Json.h"
@@ -77,23 +78,40 @@ bool ParseRule(const json::Value& v, const std::wstring& path, Rule& rule, std::
         error = path + L".target.type: обязательная строка";
         return false;
     }
-    if (type->AsString() != "adapter") {
-        error = std::format(L"{}.target.type: тип «{}» пока не поддерживается (есть только \"adapter\")",
+    if (type->AsString() == "proxy") {
+        // { "type": "proxy", "socks5": "127.0.0.1:10808" } (#17)
+        const auto* socks = target->Find("socks5");
+        std::optional<SOCKADDR_INET> address;
+        if (socks && socks->IsString()) {
+            if (auto w = FromUtf8(socks->AsString())) {
+                address = ParseProxyAddress(*w);
+            }
+        }
+        if (!address) {
+            error = path + L".target.socks5: ожидался адрес SOCKS5-прокси вида \"127.0.0.1:10808\" или \"[::1]:1080\"";
+            return false;
+        }
+        rule.proxy = FormatProxyAddress(*address);
+        rule.adapter.clear();
+    } else if (type->AsString() != "adapter") {
+        error = std::format(L"{}.target.type: тип «{}» не поддерживается (есть \"adapter\" и \"proxy\")",
                             path, Wide(type->AsString()));
         return false;
     }
-    const auto* id = target->Find("id");
+    const auto* id = rule.proxy.empty() ? target->Find("id") : nullptr;
     std::optional<std::wstring> guid;
     if (id && id->IsString()) {
         if (auto w = FromUtf8(id->AsString())) {
             guid = NormalizeGuid(*w);
         }
     }
-    if (!guid) {
+    if (!guid && rule.proxy.empty()) {
         error = path + L".target.id: ожидался GUID интерфейса вида \"{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}\"";
         return false;
     }
-    rule.adapter = std::move(*guid);
+    if (guid) {
+        rule.adapter = std::move(*guid);
+    }
 
     const auto enumField = [&]<size_t N>(const char* name, const char* const (&names)[N], int& out) {
         const auto* f = v.Find(name);
@@ -327,8 +345,13 @@ std::string SerializeConfig(const Config& config)
     json::Array rules;
     for (const auto& rule : config.rules) {
         json::Object target;
-        target.emplace_back("type", "adapter");
-        target.emplace_back("id", ToUtf8(rule.adapter));
+        if (!rule.proxy.empty()) {
+            target.emplace_back("type", "proxy");
+            target.emplace_back("socks5", ToUtf8(rule.proxy));
+        } else {
+            target.emplace_back("type", "adapter");
+            target.emplace_back("id", ToUtf8(rule.adapter));
+        }
 
         json::Object r;
         r.emplace_back("app", ToUtf8(rule.app));
@@ -470,6 +493,12 @@ std::optional<std::wstring> ValidateRule(const Rule& rule)
     }
     if (rule.app.find_first_of(L"\"<>|?*") != std::wstring::npos) {
         return L"Путь к программе содержит недопустимые символы.";
+    }
+    if (!rule.proxy.empty()) {
+        if (!ParseProxyAddress(rule.proxy)) {
+            return L"Адрес прокси — IP-адрес и порт, например 127.0.0.1:10808.";
+        }
+        return std::nullopt;
     }
     if (!NormalizeGuid(rule.adapter)) {
         return L"Не выбран интерфейс.";

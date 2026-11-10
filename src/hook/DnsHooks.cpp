@@ -14,6 +14,7 @@
 #include "core/NetAdapters.h"
 #include "core/Policy.h"
 #include "core/Process.h"
+#include "core/Socks5.h"
 #include "core/Util.h"
 
 #include <ws2tcpip.h>
@@ -30,6 +31,7 @@ namespace approute::hook {
 namespace {
 
 AdapterResolver* g_resolver = nullptr;
+FakeIpPool* g_fake = nullptr;
 UnavailablePolicy g_policy;
 std::vector<DohServer> g_doh;
 
@@ -216,6 +218,32 @@ enum class Resolution {
 // окончательного ответа — по политике правила: системный резолвер (default) или ошибка (block).
 Resolution ResolveName(const std::wstring& name, int family, DnsAnswer& answer)
 {
+    if (g_fake) {
+        // Правило «прокси»: имя разрешит прокси при соединении. localhost и имена без точки
+        // (узлы локальной сети) — системе
+        if (EqualsIgnoreCase(name, L"localhost") || name.find(L'.') == std::wstring::npos) {
+            return Resolution::System;
+        }
+        const auto host = ProxyHostName(name);
+        if (!host) {
+            return Resolution::System;
+        }
+        SOCKADDR_INET a = g_fake->Allocate(*host);
+        if (family == AF_INET6) {
+            // Только IPv6 — ::ffff:служебный IPv4 (двухстековые сокеты)
+            SOCKADDR_INET v6{};
+            v6.Ipv6.sin6_family = AF_INET6;
+            v6.Ipv6.sin6_addr.u.Byte[10] = 0xFF;
+            v6.Ipv6.sin6_addr.u.Byte[11] = 0xFF;
+            std::memcpy(&v6.Ipv6.sin6_addr.u.Byte[12], &a.Ipv4.sin_addr, 4);
+            a = v6;
+        }
+        answer = {};
+        answer.outcome = DnsOutcome::Resolved;
+        answer.addresses.push_back(a);
+        answer.via = L"прокси";
+        return Resolution::Answer;
+    }
     DnsInterface iface;
     const bool available = CurrentInterface(iface);
     if (available) {
@@ -411,14 +439,15 @@ void HookApi(const char* name, T* detour, T** original)
 
 } // namespace
 
-void CreateDnsHooks(AdapterResolver& resolver, const UnavailablePolicy& policy)
+bool CreateDnsHooks(AdapterResolver& resolver, const UnavailablePolicy& policy, FakeIpPool* fake)
 {
     wchar_t mode[16] = {};
     if (GetEnvironmentVariableW(kEnvDns, mode, 16) != 0 && EqualsIgnoreCase(mode, L"system")) {
         Log(L"DNS: системный резолвер (APPROUTE_DNS=system)");
-        return;
+        return false;
     }
     g_resolver = &resolver;
+    g_fake = fake;
     g_policy = policy;
     g_doh = DefaultDohServers();
 
@@ -428,6 +457,7 @@ void CreateDnsHooks(AdapterResolver& resolver, const UnavailablePolicy& policy)
     HookApi("freeaddrinfo", &Hook_freeaddrinfo, &Real_freeaddrinfo);
     HookApi("FreeAddrInfoW", &Hook_FreeAddrInfoW, &Real_FreeAddrInfoW);
     HookApi("FreeAddrInfoExW", &Hook_FreeAddrInfoExW, &Real_FreeAddrInfoExW);
+    return true;
 }
 
 } // namespace approute::hook

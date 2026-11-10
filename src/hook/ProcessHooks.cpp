@@ -120,7 +120,7 @@ void InjectChild(HANDLE process, DWORD pid, const std::wstring& name)
 
 std::vector<wchar_t> RuleEnvironment(const void* environment, bool unicode)
 {
-    EnvVars vars = {{kEnvAdapter, g_config.adapterGuid}};
+    EnvVars vars = {{kEnvAdapter, g_config.adapterGuid}, {kEnvProxy, g_config.proxy}};
     if (!g_config.logPath.empty()) {
         vars.emplace_back(kEnvLog, g_config.logPath);
     }
