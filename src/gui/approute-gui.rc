@@ -10,11 +10,14 @@ LANGUAGE LANG_RUSSIAN, SUBLANG_DEFAULT
 IDI_APP ICON "../../resources/approute.ico"
 
 // Главное окно: размеры и положение кнопок пересчитываются в WM_SIZE
-IDD_MAIN DIALOGEX 0, 0, 470, 230
+IDD_MAIN DIALOGEX 0, 0, 470, 260
 STYLE DS_SHELLFONT | DS_CENTER | WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
 CAPTION "AppRoute — правила программ"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
+    LTEXT           "Весь &трафик через:", IDC_PRIMARY_LABEL, 7, 9, 70, 9
+    COMBOBOX        IDC_PRIMARY, 80, 7, 200, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_PRIMARY_STATE, 7, 23, 456, 18, SS_NOPREFIX
     CONTROL         "", IDC_RULES, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP, 7, 7, 396, 200
     PUSHBUTTON      "&Добавить…", IDC_ADD, 410, 7, 53, 14
     PUSHBUTTON      "&Изменить…", IDC_EDIT, 410, 25, 53, 14

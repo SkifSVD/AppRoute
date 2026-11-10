@@ -3,12 +3,17 @@
 //   approute-routes list
 //   approute-routes plan  [--primary <интерфейс>] [--ensure-default <интерфейс>]... [--metric N]
 //   approute-routes watch [--primary <интерфейс>] [--ensure-default <интерфейс>]... [--metric N]
+//                         [--config FILE]
 //
+// Без --primary основной интерфейс берётся из поля "primary" конфига (глобальный
+// переключатель, #14); watch перечитывает конфиг при изменении и переключается на лету.
 // <интерфейс> — ifIndex, GUID или имя (как в "Сетевых подключениях").
 // watch применяет политику, следит за изменениями (переподключение VPN) и откатывает всё
 // при выходе (Ctrl+C / закрытие окна). Изменения не переживают перезагрузку.
 
+#include "core/Config.h"
 #include "core/NetAdapters.h"
+#include "core/PrimarySwitch.h"
 #include "core/ConflictGuard.h"
 #include "core/RouteManager.h"
 #include "core/Routes.h"
@@ -97,6 +102,7 @@ struct Options {
     std::vector<std::wstring> ensureDefault;
     std::vector<std::wstring> routes;   // "PREFIX=IF"
     std::optional<ULONG> metric;
+    std::wstring config;                // файл правил; пусто — по умолчанию
 };
 
 void PrintUsage()
@@ -111,7 +117,9 @@ void PrintUsage()
     Line(L"      применить и поддерживать политику; Ctrl+C — откатить и выйти (нужны права администратора)");
     Line();
     Line(L"  IF — ifIndex, GUID или имя интерфейса.");
-    Line(L"  --primary         через этот интерфейс идёт весь трафик (по умолчанию — физический с лучшей метрикой)");
+    Line(L"  --primary         через этот интерфейс идёт весь трафик; без параметра — из конфига (\"primary\",");
+    Line(L"                    переключатель в approute-gui), \"auto\" — физический с лучшей метрикой");
+    Line(L"  --config          файл правил (по умолчанию %APPDATA%\\AppRoute\\config.json)");
     Line(L"  --ensure-default  добавить на интерфейс маршрут 0/0 с низким приоритетом (для привязки приложений)");
     Line(L"  --route           закрепить подсеть за интерфейсом, например 160.79.104.0/23=happ-xray:");
     Line(L"                    трафик всех программ в эту подсеть идёт через него, остальной — как обычно");
@@ -146,6 +154,10 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
             auto v = value();
             if (!v) return std::nullopt;
             o.routes.push_back(*v);
+        } else if (arg == L"--config") {
+            auto v = value();
+            if (!v) return std::nullopt;
+            o.config = *v;
         } else if (arg == L"--metric") {
             auto v = value();
             if (!v) return std::nullopt;
@@ -158,7 +170,31 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
     return o;
 }
 
-std::optional<RoutePolicy> BuildPolicy(const Options& o)
+std::wstring ConfigPath(const Options& o)
+{
+    return o.config.empty() ? DefaultConfigPath() : o.config;
+}
+
+// Основной интерфейс из конфига (переключатель #14). note — пояснение (недоступен, конфиг не
+// прочитан), печатает вызывающий.
+std::optional<NET_LUID> PrimaryFromConfig(const Options& o, const std::vector<NetAdapter>& adapters,
+                                          std::wstring& note)
+{
+    std::wstring configured = L"auto";
+    std::wstring error;
+    if (const auto config = LoadConfig(ConfigPath(o), &error)) {
+        configured = config->primary;
+    } else {
+        note = L"конфиг не прочитан, основной интерфейс — автоматически: " + error;
+    }
+    const auto choice = ChoosePrimary(configured, adapters, DetectPrimaryInterface());
+    if (!choice.note.empty()) {
+        note = choice.note;
+    }
+    return choice.luid;
+}
+
+std::optional<RoutePolicy> BuildPolicy(const Options& o, std::wstring* primaryNote = nullptr)
 {
     const auto adapters = EnumerateAdapters();
     RoutePolicy policy;
@@ -171,12 +207,18 @@ std::optional<RoutePolicy> BuildPolicy(const Options& o)
         }
         policy.primary = a->luid;
     } else {
-        const auto detected = DetectPrimaryInterface();
-        if (!detected) {
+        std::wstring note;
+        const auto primary = PrimaryFromConfig(o, adapters, note);
+        if (primaryNote) {
+            *primaryNote = note;
+        } else if (!note.empty()) {
+            Line(L"⚠ " + note);
+        }
+        if (!primary) {
             Line(L"Ошибка: не удалось определить основной физический интерфейс, укажите --primary");
             return std::nullopt;
         }
-        policy.primary = *detected;
+        policy.primary = *primary;
     }
 
     for (const auto& key : o.ensureDefault) {
@@ -341,19 +383,39 @@ BOOL WINAPI CtrlHandler(DWORD type)
     return TRUE;
 }
 
-int CmdWatch(const RoutePolicy& policy)
+int CmdWatch(const Options& options)
 {
     if (!IsProcessElevated()) {
         Line(L"Ошибка: для изменения маршрутов нужны права администратора.");
         Line(L"Запустите терминал «от имени администратора» и повторите команду.");
         return 2;
     }
+    // Один менеджер маршрутов на сеанс; по мьютексу его видит и approute-gui
+    const HANDLE single = CreateMutexW(nullptr, FALSE, kRouteManagerMutex);
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        Line(L"Ошибка: менеджер маршрутов уже запущен (другое окно approute-routes watch).");
+        CloseHandle(single);
+        return 1;
+    }
+    std::wstring primaryNote;
+    const auto initial = BuildPolicy(options, &primaryNote);
+    if (!initial) {
+        return 1;
+    }
+    const RoutePolicy& policy = *initial;
 
     g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
 
     PrintPolicy(policy);
+    if (!primaryNote.empty()) {
+        Line(L"⚠ " + primaryNote);
+    }
+    const bool switchable = !options.primary;
+    if (switchable) {
+        Line(std::format(L"Основной интерфейс — из {} (переключатель в approute-gui).", ConfigPath(options)));
+    }
     Line(L"Слежу за изменениями маршрутов. Ctrl+C — откатить изменения и выйти.");
     Line();
 
@@ -384,10 +446,45 @@ int CmdWatch(const RoutePolicy& policy)
         }
     };
 
+    // Переключатель (#14): основной интерфейс из конфига мог смениться (выбор в GUI) или стать
+    // недоступным (выбранный VPN отключился). Смена — откат изменений старой политики и
+    // применение новой; правила приложений это не затрагивает.
+    std::wstring lastNote = primaryNote;
+    auto followPrimary = [&] {
+        if (!switchable) {
+            return;
+        }
+        try {
+            std::wstring note;
+            const auto next = BuildPolicy(options, &note);
+            if (note != lastNote && !note.empty()) {
+                Line(std::format(L"[{}] ⚠ {}", Now(), note));
+            }
+            lastNote = note;
+            if (!next || SameLuid(next->primary, manager.Policy().primary)) {
+                return;
+            }
+            Line(std::format(L"[{}] основной интерфейс: [{}] → [{}]", Now(), InterfaceName(manager.Policy().primary),
+                             InterfaceName(next->primary)));
+            manager.Revert(log);
+            manager = RouteManager(*next);
+            guard = ConflictGuard{};
+        } catch (const std::exception& e) {
+            Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
+        }
+    };
+
+    std::optional<FileChangeWatcher> configWatch;
+    if (switchable) {
+        configWatch.emplace(ConfigPath(options));
+    }
     pass();
-    const HANDLE handles[] = {g_stop, notifier.Event()};
+    std::vector<HANDLE> handles = {g_stop, notifier.Event()};
+    if (configWatch && configWatch->Event()) {
+        handles.push_back(configWatch->Event());
+    }
     for (;;) {
-        const DWORD w = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
         if (w == WAIT_OBJECT_0) {
             break;
         }
@@ -396,6 +493,10 @@ int CmdWatch(const RoutePolicy& policy)
             break;
         }
         ResetEvent(notifier.Event());
+        if (configWatch) {
+            configWatch->Rearm();
+        }
+        followPrimary();
         pass();
     }
 
@@ -403,6 +504,9 @@ int CmdWatch(const RoutePolicy& policy)
     Line(std::format(L"[{}] откатываю изменения…", Now()));
     manager.Revert(log);
     Line(L"Готово.");
+    if (single) {
+        CloseHandle(single);
+    }
     SetEvent(g_done);
     return 0;
 }
@@ -421,12 +525,15 @@ int wmain(int argc, wchar_t** argv)
         if (options->command == L"list") {
             return CmdList();
         }
-        if (options->command == L"plan" || options->command == L"watch") {
+        if (options->command == L"watch") {
+            return CmdWatch(*options);
+        }
+        if (options->command == L"plan") {
             const auto policy = BuildPolicy(*options);
             if (!policy) {
                 return 1;
             }
-            return options->command == L"plan" ? CmdPlan(*policy) : CmdWatch(*policy);
+            return CmdPlan(*policy);
         }
         PrintUsage();
         return 1;
