@@ -17,6 +17,7 @@ add_library(approute_core STATIC
     PrimarySwitch.h PrimarySwitch.cpp
     ConfigPolicy.h  ConfigPolicy.cpp
     ManagerPipe.h   ManagerPipe.cpp
+    ServiceSetup.h  ServiceSetup.cpp
     Policy.h
 )
 

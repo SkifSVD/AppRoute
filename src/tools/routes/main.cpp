@@ -5,6 +5,12 @@
 //   approute-routes watch [--primary <интерфейс>] [--ensure-default <интерфейс>]... [--metric N]
 //                         [--config FILE]
 //   approute-routes serve [--config FILE] [--client-sid SID]
+//   approute-routes install-service [--config FILE] [--client-sid SID]
+//   approute-routes uninstall-service
+//   approute-routes service --config FILE --client-sid SID   (запускает диспетчер служб)
+//
+// Служба (#16) — тот же менеджер маршрутов, работающий постоянно: ставится только явно
+// (install-service из approute-gui после согласия и UAC), удаляется uninstall-service.
 //
 // serve — менеджер маршрутов, запущенный из approute-gui с согласия пользователя (#15): без
 // консоли, журнал в %LOCALAPPDATA%\AppRoute\routes.log, вся политика из конфига (основной
@@ -23,6 +29,7 @@
 #include "core/PrimarySwitch.h"
 #include "core/ConflictGuard.h"
 #include "core/RouteManager.h"
+#include "core/ServiceSetup.h"
 #include "core/Routes.h"
 #include "core/Util.h"
 
@@ -129,6 +136,11 @@ void PrintUsage()
     Line(L"  approute-routes serve [--config FILE]");
     Line(L"      менеджер маршрутов для approute-gui: без консоли, политика из конфига, журнал");
     Line(L"      %LOCALAPPDATA%\\AppRoute\\routes.log; запускается из окна с вашего согласия");
+    Line(L"  approute-routes install-service [--config FILE]");
+    Line(L"      установить менеджер маршрутов службой Windows: работает постоянно, в том числе после");
+    Line(L"      перезагрузки; файлы копируются в %ProgramFiles%\\AppRoute (нужны права администратора)");
+    Line(L"  approute-routes uninstall-service");
+    Line(L"      остановить службу (изменения откатываются) и удалить её");
     Line();
     Line(L"  IF — ifIndex, GUID или имя интерфейса.");
     Line(L"  --primary         через этот интерфейс идёт весь трафик; без параметра — из конфига (\"primary\",");
@@ -411,7 +423,7 @@ int CmdWatch(const Options& options)
     // Один менеджер маршрутов на сеанс; по мьютексу его видит и approute-gui
     const HANDLE single = CreateMutexW(nullptr, FALSE, kRouteManagerMutex);
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-        Line(L"Ошибка: менеджер маршрутов уже запущен (другое окно approute-routes watch).");
+        Line(L"Ошибка: менеджер маршрутов уже запущен (служба AppRoute, окно approute-gui или другое approute-routes watch).");
         CloseHandle(single);
         return 1;
     }
@@ -557,26 +569,27 @@ HANDLE OpenServeLog()
     return h == INVALID_HANDLE_VALUE ? nullptr : h;
 }
 
-int CmdServe(const Options& options)
+// Менеджер маршрутов без консоли — для serve (канал с approute-gui) и службы (#16, без канала:
+// ею управляет диспетчер служб). g_stop должен быть создан. 0 — штатная остановка.
+int RunManager(const Options& options, bool withPipe, const wchar_t* who)
 {
-    g_logFile = OpenServeLog();
     if (!IsProcessElevated()) {
         Line(L"Ошибка: для изменения маршрутов нужны права администратора.");
         return 2;
     }
+    // Один менеджер маршрутов на компьютер (Global\): служба, serve или watch
     const HANDLE single = CreateMutexW(nullptr, FALSE, kRouteManagerMutex);
-    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (!single || GetLastError() == ERROR_ALREADY_EXISTS) {
         Line(std::format(L"[{}] менеджер маршрутов уже запущен — выход", Now()));
-        CloseHandle(single);
+        if (single) {
+            CloseHandle(single);
+        }
         return 1;
     }
-    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    SetConsoleCtrlHandler(CtrlHandler, TRUE);
 
     const std::wstring configPath = ConfigPath(options);
     Line();
-    Line(std::format(L"[{}] менеджер маршрутов запущен (PID {}), правила: {}", Now(), GetCurrentProcessId(), configPath));
+    Line(std::format(L"[{}] {} запущен (PID {}), правила: {}", Now(), who, GetCurrentProcessId(), configPath));
 
     // Состояние для approute-gui (запрос STATUS)
     std::mutex statusLock;
@@ -610,7 +623,7 @@ int CmdServe(const Options& options)
                                return "{\"error\":\"unknown\"}";
                            });
     std::wstring pipeError;
-    if (!pipe.Start(&pipeError)) {
+    if (withPipe && !pipe.Start(&pipeError)) {
         // Без канала окно не сможет остановить менеджер — не запускаемся
         Line(std::format(L"[{}] ошибка: {}", Now(), pipeError));
         CloseHandle(single);
@@ -708,9 +721,150 @@ int CmdServe(const Options& options)
     if (manager) {
         manager->Revert(log);
     }
-    Line(std::format(L"[{}] менеджер маршрутов остановлен", Now()));
+    Line(std::format(L"[{}] {} остановлен", Now(), who));
     CloseHandle(single);
+    return 0;
+}
+
+int CmdServe(const Options& options)
+{
+    g_logFile = OpenServeLog();
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+    const int code = RunManager(options, true, L"менеджер маршрутов");
     SetEvent(g_done);
+    return code;
+}
+
+// --- служба (#16) ---------------------------------------------------------------------------
+
+Options g_serviceOptions;
+SERVICE_STATUS_HANDLE g_serviceStatus = nullptr;
+SERVICE_STATUS g_status{SERVICE_WIN32_OWN_PROCESS, SERVICE_STOPPED, 0, NO_ERROR, 0, 0, 0};
+
+void ReportService(DWORD state, DWORD exitCode = NO_ERROR, DWORD waitHint = 0)
+{
+    static DWORD checkPoint = 1;
+    g_status.dwCurrentState = state;
+    g_status.dwWin32ExitCode = exitCode;
+    g_status.dwWaitHint = waitHint;
+    g_status.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN : 0;
+    g_status.dwCheckPoint = (state == SERVICE_RUNNING || state == SERVICE_STOPPED) ? 0 : checkPoint++;
+    SetServiceStatus(g_serviceStatus, &g_status);
+}
+
+DWORD WINAPI ServiceControl(DWORD control, DWORD, void*, void*)
+{
+    switch (control) {
+    case SERVICE_CONTROL_STOP:
+    case SERVICE_CONTROL_SHUTDOWN:
+        ReportService(SERVICE_STOP_PENDING, NO_ERROR, 15000);   // откат маршрутов
+        SetEvent(g_stop);
+        return NO_ERROR;
+    case SERVICE_CONTROL_INTERROGATE:
+        return NO_ERROR;
+    default:
+        return ERROR_CALL_NOT_IMPLEMENTED;
+    }
+}
+
+std::wstring ProgramDataDirectory()
+{
+    wchar_t data[MAX_PATH * 2] = {};
+    if (!GetEnvironmentVariableW(L"ProgramData", data, static_cast<DWORD>(std::size(data)))) {
+        return {};
+    }
+    return std::wstring(data) + L"\\AppRoute";
+}
+
+void WINAPI ServiceMain(DWORD, wchar_t**)
+{
+    g_serviceStatus = RegisterServiceCtrlHandlerExW(kServiceName, ServiceControl, nullptr);
+    if (!g_serviceStatus) {
+        return;
+    }
+    ReportService(SERVICE_START_PENDING, NO_ERROR, 5000);
+    // Журнал — в защищённой папке (читать могут пользователи, писать — только SYSTEM и
+    // администраторы); не открылся безопасно — работаем без журнала
+    const std::wstring dir = ProgramDataDirectory();
+    if (!dir.empty()) {
+        g_logFile = OpenProtectedLog(dir, L"routes.log");
+    }
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ReportService(SERVICE_RUNNING);
+    int code = 1;
+    try {
+        code = RunManager(g_serviceOptions, false, L"менеджер маршрутов (служба AppRoute)");
+    } catch (const std::exception& e) {
+        Line(std::format(L"[{}] ошибка: {}", Now(), Widen(e.what())));
+    }
+    if (g_logFile) {
+        CloseHandle(g_logFile);
+        g_logFile = nullptr;
+    }
+    // Ненулевой код — диспетчер служб перезапустит службу (действия при сбое)
+    ReportService(SERVICE_STOPPED, code == 0 ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR);
+}
+
+int CmdService(const Options& options)
+{
+    if (options.config.empty()) {
+        Line(L"Ошибка: службе нужен --config (файл правил пользователя).");
+        return 1;
+    }
+    g_serviceOptions = options;
+    wchar_t name[] = L"AppRoute";
+    SERVICE_TABLE_ENTRYW table[] = {{name, ServiceMain}, {nullptr, nullptr}};
+    if (!StartServiceCtrlDispatcherW(table)) {
+        Line(L"Ошибка: команду service запускает диспетчер служб Windows. Установка — install-service.");
+        return 1;
+    }
+    return 0;
+}
+
+// Итог установки/удаления — и в %ProgramData%\AppRoute\install.log: approute-gui запускает команду
+// без консоли и показывает пользователю последнюю строку
+void OpenInstallLog()
+{
+    const std::wstring dir = ProgramDataDirectory();
+    if (!dir.empty() && IsProcessElevated()) {
+        g_logFile = OpenProtectedLog(dir, L"install.log");
+    }
+}
+
+int CmdInstallService(const Options& options)
+{
+    OpenInstallLog();
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: для установки службы нужны права администратора.");
+        return 2;
+    }
+    const std::wstring sid = options.clientSid.empty() ? CurrentUserSid() : options.clientSid;
+    const std::wstring config = ConfigPath(options);
+    std::wstring error;
+    if (!InstallAppRouteService(ThisDirectory(), config, sid, &error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    Line(std::format(L"Служба AppRoute установлена в {} и запущена; правила: {}", InstallDirectory(), config));
+    Line(L"Журнал: %ProgramData%\\AppRoute\\routes.log. Удаление — approute-routes uninstall-service.");
+    return 0;
+}
+
+int CmdUninstallService()
+{
+    OpenInstallLog();
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: для удаления службы нужны права администратора.");
+        return 2;
+    }
+    std::wstring error;
+    if (!UninstallAppRouteService(&error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    Line(L"Служба AppRoute остановлена (изменения маршрутов откачены) и удалена.");
     return 0;
 }
 
@@ -733,6 +887,15 @@ int wmain(int argc, wchar_t** argv)
         }
         if (options->command == L"serve") {
             return CmdServe(*options);
+        }
+        if (options->command == L"service") {
+            return CmdService(*options);
+        }
+        if (options->command == L"install-service") {
+            return CmdInstallService(*options);
+        }
+        if (options->command == L"uninstall-service") {
+            return CmdUninstallService();
         }
         if (options->command == L"plan") {
             const auto policy = BuildPolicy(*options);
