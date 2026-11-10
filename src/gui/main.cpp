@@ -19,6 +19,7 @@
 #include "core/NetAdapters.h"
 #include "core/PrimarySwitch.h"
 #include "core/RouteManager.h"
+#include "core/ServiceSetup.h"
 #include "core/Shortcuts.h"
 #include "core/Util.h"
 
@@ -1161,6 +1162,8 @@ int PrimaryIndex()
     return 0;
 }
 
+std::wstring ManagerCommandText(bool running);
+
 void UpdatePrimaryState()
 {
     std::wstring state;
@@ -1197,7 +1200,7 @@ void UpdatePrimaryState()
     }
 
     SetDlgItemTextW(g.main, IDC_PRIMARY_STATE, state.c_str());
-    SetDlgItemTextW(g.main, IDC_MANAGER, running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…");
+    SetDlgItemTextW(g.main, IDC_MANAGER, ManagerCommandText(running).c_str());
     EnableWindow(GetDlgItem(g.main, IDC_MANAGER), !g.readOnly || running);
     WrapLabel(g.main, IDC_PRIMARY_STATE);
 
@@ -1268,7 +1271,7 @@ void OnPrimaryComboChanged()
     }
 }
 
-// --- менеджер маршрутов: запуск с согласия и остановка (#15) --------------------------------
+// --- менеджер маршрутов: запуск с согласия и остановка (#15), служба (#16) ------------------
 
 std::wstring ThisExe()
 {
@@ -1326,8 +1329,97 @@ HRESULT CALLBACK ConsentCallback(HWND dialog, UINT msg, WPARAM, LPARAM, LONG_PTR
 {
     if (msg == TDN_CREATED) {
         SendMessageW(dialog, TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, 100, TRUE);   // щит UAC
+        SendMessageW(dialog, TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, 102, TRUE);
     }
     return S_OK;
+}
+
+// approute-routes с правами администратора (запрос UAC); код выхода или nullopt (отменено)
+std::optional<DWORD> RunRoutesElevated(const std::wstring& params, std::wstring* error)
+{
+    const std::wstring routes = BinPath(L"approute-routes.exe");
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+    sei.hwnd = g.main;
+    sei.lpVerb = L"runas";
+    sei.lpFile = routes.c_str();
+    sei.lpParameters = params.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei)) {
+        const DWORD code = GetLastError();
+        if (code != ERROR_CANCELLED) {
+            *error = Win32ErrorMessage(code);
+        }
+        return std::nullopt;
+    }
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    DWORD exitCode = 1;
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 120000);
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+    }
+    SetCursor(old);
+    return exitCode;
+}
+
+bool ServiceInstalled()
+{
+    const ServiceState s = QueryServiceState();
+    return s != ServiceState::NotInstalled;
+}
+
+std::wstring ManagerCommandText(bool running)
+{
+    if (ServiceInstalled()) {
+        return running ? L"Остановить &службу AppRoute…" : L"Запустить &службу AppRoute";
+    }
+    return running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…";
+}
+
+// Установка службы (#16): менеджер маршрутов работает постоянно, в том числе после перезагрузки.
+// Согласие уже получено в окне запуска; дальше — UAC.
+void InstallService()
+{
+    const std::wstring params =
+        L"install-service --config " + QuoteArgument(g.configPath) + L" --client-sid " + CurrentUserSid();
+    std::wstring error;
+    const auto code = RunRoutesElevated(params, &error);
+    if (!code) {
+        SetStatus(error.empty() ? L"Установка службы отменена" : L"Служба не установлена: " + error);
+        return;
+    }
+    if (*code != 0) {
+        Message(g.main,
+                L"Служба AppRoute не установлена. Подробности покажет команда в консоли администратора:\n\n"
+                L"approute-routes install-service --config " + QuoteArgument(g.configPath),
+                MB_ICONWARNING);
+        return;
+    }
+    for (int i = 0; i < 25 && !IsRouteManagerRunning(); ++i) {
+        Sleep(200);
+    }
+    SetStatus(L"Служба AppRoute установлена и запущена · журнал: %ProgramData%\\AppRoute\\routes.log");
+    RefreshStates();
+}
+
+void UninstallService()
+{
+    std::wstring error;
+    const auto code = RunRoutesElevated(L"uninstall-service", &error);
+    if (!code) {
+        SetStatus(error.empty() ? L"Удаление службы отменено" : L"Служба не удалена: " + error);
+        return;
+    }
+    if (*code != 0) {
+        Message(g.main, L"Службу AppRoute удалить не удалось. Подробности покажет команда в консоли "
+                        L"администратора:\n\napproute-routes uninstall-service",
+                MB_ICONWARNING);
+        return;
+    }
+    SetStatus(L"Служба AppRoute удалена, изменения маршрутов откачены");
+    RefreshStates();
 }
 
 // Явное согласие: что именно будет изменено, что это временно, затем — запрос UAC
@@ -1336,10 +1428,27 @@ void StartManager()
     if (g.readOnly || IsRouteManagerRunning()) {
         return;
     }
+    if (ServiceInstalled()) {
+        // Служба уже установлена с согласия пользователя — запуск без UAC
+        std::wstring error;
+        if (!StartAppRouteService(&error)) {
+            Message(g.main, L"Не удалось запустить службу AppRoute: " + error, MB_ICONWARNING);
+            return;
+        }
+        for (int i = 0; i < 25 && !IsRouteManagerRunning(); ++i) {
+            Sleep(200);
+        }
+        SetStatus(L"Служба AppRoute запущена · журнал: %ProgramData%\\AppRoute\\routes.log");
+        RefreshStates();
+        return;
+    }
     LoadAdapters();
     const std::wstring details = DescribeManagerPlan();
     const TASKDIALOG_BUTTON buttons[] = {
-        {100, L"Запустить менеджер маршрутов\nWindows попросит подтвердить права администратора"},
+        {100, L"Запустить менеджер маршрутов\nДо остановки или перезагрузки. Windows попросит подтвердить права "
+              L"администратора"},
+        {102, L"Запускать постоянно — службой Windows\nМенеджер будет работать и после перезагрузки. Файлы "
+              L"копируются в Program Files; удалить службу можно здесь же или в меню значка"},
         {101, L"Не запускать"},
     };
     TASKDIALOGCONFIG tdc{};
@@ -1355,8 +1464,9 @@ void StartManager()
         L"Менеджер маршрутов держит маршрут в интернет на выбранном интерфейсе («весь трафик через») и даёт "
         L"программам с правилами выход через их интерфейсы. Он меняет метрики интерфейсов и маршруты Windows, "
         L"поэтому ему нужны права администратора.\n\n"
-        L"Изменения временные: всё откатывается при остановке менеджера (здесь или в меню значка) и не "
-        L"переживает перезагрузку. Чужие маршруты VPN-клиентов не удаляются, только получают меньший приоритет.";
+        L"Изменения откатываются при остановке менеджера (здесь или в меню значка). Обычный запуск действует до "
+        L"перезагрузки; служба Windows запускается вместе с системой. Чужие маршруты VPN-клиентов не удаляются, "
+        L"только получают меньший приоритет.";
     tdc.pszExpandedInformation = details.c_str();
     tdc.pszExpandedControlText = L"Скрыть подробности";
     tdc.pszCollapsedControlText = L"Что будет изменено";
@@ -1365,8 +1475,12 @@ void StartManager()
     tdc.nDefaultButton = 101;
     tdc.pfCallback = ConsentCallback;
     int choice = 0;
-    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, nullptr)) || choice != 100) {
+    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, nullptr)) || (choice != 100 && choice != 102)) {
         SetStatus(L"Менеджер маршрутов не запущен");
+        return;
+    }
+    if (choice == 102) {
+        InstallService();
         return;
     }
 
@@ -1393,8 +1507,51 @@ void StartManager()
     RefreshStates();
 }
 
+void StopService()
+{
+    const TASKDIALOG_BUTTON buttons[] = {
+        {100, L"Остановить службу\nДо следующего запуска Windows или до запуска здесь"},
+        {101, L"Удалить службу\nМенеджер маршрутов больше не будет запускаться сам. Нужны права администратора"},
+        {102, L"Отмена"},
+    };
+    TASKDIALOGCONFIG tdc{};
+    tdc.cbSize = sizeof(tdc);
+    tdc.hwndParent = g.main;
+    tdc.hInstance = g.instance;
+    tdc.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    tdc.pszWindowTitle = L"AppRoute";
+    tdc.pszMainInstruction = L"Остановить службу AppRoute?";
+    tdc.pszContent = L"Изменения маршрутов откатятся в обоих случаях.";
+    tdc.pButtons = buttons;
+    tdc.cButtons = static_cast<UINT>(std::size(buttons));
+    tdc.nDefaultButton = 100;
+    int choice = 0;
+    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, nullptr)) || choice == 102 || choice == IDCANCEL) {
+        return;
+    }
+    if (choice == 101) {
+        UninstallService();
+        return;
+    }
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::wstring error;
+    const bool ok = StopAppRouteService(&error);
+    SetCursor(old);
+    if (!ok) {
+        Message(g.main, L"Не удалось остановить службу AppRoute: " + error, MB_ICONWARNING);
+        return;
+    }
+    SetStatus(L"Служба AppRoute остановлена, изменения маршрутов откачены");
+    RefreshStates();
+}
+
 void StopManager()
 {
+    const ServiceState service = QueryServiceState();
+    if (service == ServiceState::Running || service == ServiceState::Starting) {
+        StopService();
+        return;
+    }
     const ManagerReply reply = CallManager(ManagerPipeName(), "STOP", BinPath(L"approute-routes.exe"));
     if (!reply.ok) {
         Message(g.main, L"Не удалось остановить менеджер маршрутов: " + reply.error +
@@ -1496,7 +1653,10 @@ void ShowTrayMenu()
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     const bool running = IsRouteManagerRunning();
     AppendMenuW(menu, MF_STRING | (g.readOnly && !running ? MF_GRAYED : 0), IDM_TRAY_MANAGER,
-                running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…");
+                ManagerCommandText(running).c_str());
+    if (ServiceInstalled()) {
+        AppendMenuW(menu, MF_STRING, IDM_TRAY_UNINSTALL, L"&Удалить службу AppRoute…");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"&Открыть AppRoute");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"&Выход");
@@ -1508,7 +1668,10 @@ void ShowTrayMenu()
     const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main,
                                        nullptr);
     DestroyMenu(menu);
-    if (choice == IDM_TRAY_MANAGER) {
+    if (choice == IDM_TRAY_UNINSTALL) {
+        ShowMain();
+        UninstallService();
+    } else if (choice == IDM_TRAY_MANAGER) {
         if (!running) {
             ShowMain();   // окно согласия — поверх главного окна
         }
