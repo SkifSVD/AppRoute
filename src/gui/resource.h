@@ -18,6 +18,9 @@
 #define IDC_LAUNCH          1005
 #define IDC_REFRESH         1006
 #define IDC_STATUS          1007
+#define IDC_SHORTCUT        1008
+#define IDM_SHORTCUT_DESKTOP 1051
+#define IDM_SHORTCUT_START  1052
 
 // Диалог правила
 #define IDC_APP             1101

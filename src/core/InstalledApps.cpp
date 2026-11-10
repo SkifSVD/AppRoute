@@ -1,5 +1,6 @@
 #include "core/InstalledApps.h"
 
+#include "core/Com.h"
 #include "core/Util.h"
 #include "core/Win.h"
 
@@ -58,36 +59,6 @@ bool IsExistingExe(const std::wstring& path)
     const DWORD attrs = GetFileAttributesW(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
-
-// COM для IShellLink в текущем потоке, если его ещё не инициализировали
-class ComScope {
-public:
-    ComScope() : hr_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)) {}
-    ~ComScope()
-    {
-        if (SUCCEEDED(hr_)) {
-            CoUninitialize();
-        }
-    }
-    ComScope(const ComScope&) = delete;
-    ComScope& operator=(const ComScope&) = delete;
-
-private:
-    HRESULT hr_;
-};
-
-template <class T>
-struct ComPtr {
-    T* p = nullptr;
-    ~ComPtr()
-    {
-        if (p) {
-            p->Release();
-        }
-    }
-    T** operator&() { return &p; }
-    T* operator->() const { return p; }
-};
 
 // «Объявленный» ярлык установщика MSI (Office и т.п.): цель — компонент продукта
 std::optional<std::wstring> MsiShortcutTarget(const std::wstring& lnkPath)
@@ -257,7 +228,8 @@ bool IsUtilityShortcut(std::wstring_view name, std::wstring_view exePath)
             return true;
         }
     }
-    for (const wchar_t* prefix : {L"unins", L"uninst", L"uninstall"}) {
+    // unins*.exe — деинсталляторы; approute-*.exe — ярлыки запуска самого AppRoute (#13)
+    for (const wchar_t* prefix : {L"unins", L"uninst", L"uninstall", L"approute-"}) {
         if (file.starts_with(prefix)) {
             return true;
         }

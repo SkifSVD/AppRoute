@@ -12,6 +12,8 @@ add_library(approute_core STATIC
     Config.h        Config.cpp
     Launcher.h      Launcher.cpp
     InstalledApps.h InstalledApps.cpp
+    Shortcuts.h     Shortcuts.cpp
+    Com.h
     Policy.h
 )
 

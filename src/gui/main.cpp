@@ -7,6 +7,7 @@
 // Вся логика — в core (Config, Launcher, NetAdapters); здесь только окна.
 //
 //   approute-gui [--config FILE]
+//   approute-gui [--config FILE] --run PROGRAM [-- ARGS...]   — запуск по правилу без окна (ярлыки, #13)
 
 #include "resource.h"
 
@@ -14,6 +15,7 @@
 #include "core/InstalledApps.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
+#include "core/Shortcuts.h"
 #include "core/Util.h"
 
 #include <commctrl.h>
@@ -291,6 +293,7 @@ void UpdateButtons()
     EnableWindow(GetDlgItem(g.main, IDC_EDIT), selected && !g.readOnly);
     EnableWindow(GetDlgItem(g.main, IDC_REMOVE), selected && !g.readOnly);
     EnableWindow(GetDlgItem(g.main, IDC_LAUNCH), selected);
+    EnableWindow(GetDlgItem(g.main, IDC_SHORTCUT), selected);
 }
 
 void FillList(std::optional<size_t> select)
@@ -1150,6 +1153,72 @@ void LaunchSelected()
                           result.is32Bit ? L", 32-бит" : L"", AdapterLabel(rule.adapter)));
 }
 
+std::wstring KnownFolder(REFKNOWNFOLDERID id)
+{
+    PWSTR path = nullptr;
+    std::wstring out;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_CREATE, nullptr, &path))) {
+        out = path;
+    }
+    CoTaskMemFree(path);
+    return out;
+}
+
+std::wstring ThisExe()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    return path;
+}
+
+// Ярлык запуска программы правила через AppRoute (#13): на рабочем столе или в меню «Пуск»
+void CreateShortcutForSelected()
+{
+    const auto index = SelectedRule();
+    if (!index) {
+        return;
+    }
+    const Rule& rule = g.config.rules[*index];
+    std::wstring error;
+    const auto spec = LaunchShortcutFor(rule, ThisExe(), g.configPath, &error);
+    if (!spec) {
+        Message(g.main, error, MB_ICONINFORMATION);
+        return;
+    }
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, IDM_SHORTCUT_DESKTOP, L"На &рабочем столе");
+    AppendMenuW(menu, MF_STRING, IDM_SHORTCUT_START, L"В меню «&Пуск» (папка AppRoute)");
+    RECT button{};
+    GetWindowRect(GetDlgItem(g.main, IDC_SHORTCUT), &button);
+    const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                       button.left, button.bottom, 0, g.main, nullptr);
+    DestroyMenu(menu);
+    if (choice == 0) {
+        return;
+    }
+
+    std::wstring folder = KnownFolder(choice == IDM_SHORTCUT_DESKTOP ? FOLDERID_Desktop : FOLDERID_Programs);
+    if (folder.empty()) {
+        Message(g.main, L"Не удалось определить папку для ярлыка.", MB_ICONWARNING);
+        return;
+    }
+    if (choice == IDM_SHORTCUT_START) {
+        folder += L"\\AppRoute";
+        CreateDirectoryW(folder.c_str(), nullptr);
+    }
+    const std::wstring lnk = folder + L"\\" + LaunchShortcutFileName(rule);
+    if (GetFileAttributesW(lnk.c_str()) != INVALID_FILE_ATTRIBUTES &&
+        Message(g.main, std::format(L"Ярлык уже есть:\n{}\n\nЗаменить его?", lnk), MB_ICONQUESTION | MB_YESNO) != IDYES) {
+        return;
+    }
+    if (!SaveShortcut(lnk, *spec, &error)) {
+        Message(g.main, error, MB_ICONWARNING);
+        return;
+    }
+    SetStatus(L"Ярлык создан: " + lnk);
+}
+
 // --- раскладка главного окна ----------------------------------------------------------------
 
 RECT DialogUnits(int left, int top, int right, int bottom)
@@ -1174,7 +1243,7 @@ void Layout()
     const int listW = std::max(0, buttonsX - gap * 2 - margin);
     const int listH = std::max(0, static_cast<int>(client.bottom) - margin * 2 - statusH - gap);
 
-    HDWP dwp = BeginDeferWindowPos(8);
+    HDWP dwp = BeginDeferWindowPos(9);
     auto place = [&](int id, int x, int y, int w, int h) {
         dwp = DeferWindowPos(dwp, GetDlgItem(g.main, id), nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     };
@@ -1186,6 +1255,8 @@ void Layout()
     }
     y += gap * 3;
     place(IDC_LAUNCH, buttonsX, y, bw, bh);
+    y += bh + gap;
+    place(IDC_SHORTCUT, buttonsX, y, bw, bh);
     y += bh + gap * 4;
     place(IDC_REFRESH, buttonsX, y, bw, bh);
     place(IDC_STATUS, margin, client.bottom - margin - statusH, std::max(0, static_cast<int>(client.right) - margin * 2), statusH);
@@ -1295,6 +1366,9 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_LAUNCH:
             LaunchSelected();
             return TRUE;
+        case IDC_SHORTCUT:
+            CreateShortcutForSelected();
+            return TRUE;
         case IDC_REFRESH:
             Reload(true);
             return TRUE;
@@ -1318,21 +1392,72 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-std::wstring ParseConfigArgument()
+struct Arguments {
+    std::wstring config;
+    std::optional<std::wstring> run;       // --run PROGRAM
+    std::wstring programArguments;         // после «--», уже в кавычках
+};
+
+Arguments ParseArguments()
 {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::wstring path;
-    for (int i = 1; argv && i + 1 < argc; ++i) {
-        if (std::wstring_view(argv[i]) == L"--config") {
-            path = argv[i + 1];
-            break;
+    Arguments a;
+    for (int i = 1; argv && i < argc; ++i) {
+        const std::wstring_view arg = argv[i];
+        if (arg == L"--config" && i + 1 < argc) {
+            a.config = argv[++i];
+        } else if (arg == L"--run" && i + 1 < argc) {
+            a.run = argv[++i];
+        } else if (arg == L"--") {
+            for (++i; i < argc; ++i) {
+                a.programArguments += L" " + QuoteArgument(argv[i]);
+            }
         }
     }
     if (argv) {
         LocalFree(argv);
     }
-    return path.empty() ? DefaultConfigPath() : path;
+    if (a.config.empty()) {
+        a.config = DefaultConfigPath();
+    }
+    return a;
+}
+
+// Запуск по правилу без окна — так работают ярлыки AppRoute (#13)
+int RunFromShortcut(const Arguments& args)
+{
+    const std::wstring& app = *args.run;
+    std::wstring error;
+    const auto config = LoadConfig(args.config, &error);
+    if (!config) {
+        Message(nullptr, L"Не удалось прочитать правила AppRoute:\n\n" + error, MB_ICONERROR);
+        return 1;
+    }
+    const Rule* rule = FindRule(*config, Expand(app));
+    if (!rule) {
+        // Правило удалили, а ярлык остался: решает пользователь, без AppRoute ничего не запускается молча
+        if (Message(nullptr, std::format(L"Для «{}» нет правила AppRoute — возможно, его удалили.\n\n"
+                                         L"Запустить программу без AppRoute (обычным маршрутом)?",
+                                         FileNameOf(app)),
+                    MB_ICONQUESTION | MB_YESNO) == IDYES) {
+            ShellExecuteW(nullptr, nullptr, Expand(app).c_str(),
+                          args.programArguments.empty() ? nullptr : args.programArguments.c_str(), nullptr,
+                          SW_SHOWNORMAL);
+        }
+        return 1;
+    }
+    LaunchRequest request = RequestForRule(*rule, CommandLineForApp(app) + args.programArguments);
+    request.inheritStdHandles = false;
+    const LaunchResult result = LaunchWithRule(request);
+    if (!result.Ok()) {
+        Message(nullptr, std::format(L"Не удалось запустить «{}» через AppRoute:\n\n{}", FileNameOf(app),
+                                     result.message),
+                MB_ICONWARNING);
+        return 1;
+    }
+    CloseHandle(result.process);
+    return 0;
 }
 
 } // namespace
@@ -1340,9 +1465,13 @@ std::wstring ParseConfigArgument()
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
 {
     g.instance = instance;
-    g.configPath = ParseConfigArgument();
+    const Arguments args = ParseArguments();
+    g.configPath = args.config;
     // COM: ярлыки (IShellLink) и диалог выбора файла
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (args.run) {
+        return RunFromShortcut(args);
+    }
 
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
