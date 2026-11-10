@@ -50,10 +50,19 @@ struct KnownAdapter {
 
 inline constexpr size_t kMaxKnownAdapters = 16;
 
+// Подсеть, закреплённая за интерфейсом (#15): трафик ВСЕХ программ в неё идёт через этот
+// интерфейс — для сервиса, доступного только через VPN, когда программу нельзя запустить через
+// AppRoute. Применяет менеджер маршрутов. Поле "routes": [{ "prefix": "...", "adapter": "{GUID}" }].
+struct ConfigRoute {
+    std::wstring prefix;    // "160.79.104.0/23", "2607:6bc0::/48"; не маршрут по умолчанию
+    std::wstring adapter;   // GUID интерфейса
+};
+
 struct Config {
     std::wstring primary = L"auto";   // "auto" или GUID основного интерфейса
     std::vector<Rule> rules;
     std::vector<KnownAdapter> knownAdapters;   // последние выбранные — первыми
+    std::vector<ConfigRoute> routes;
 };
 
 // %APPDATA%\AppRoute\config.json

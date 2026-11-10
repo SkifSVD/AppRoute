@@ -280,6 +280,31 @@ std::optional<Config> ParseConfig(std::string_view utf8, std::wstring* error)
         }
     }
 
+    if (const auto* routes = root->Find("routes")) {
+        if (!routes->IsArray()) {
+            return fail(L"routes: ожидался массив { \"prefix\": \"ПОДСЕТЬ\", \"adapter\": \"{GUID}\" }");
+        }
+        for (size_t i = 0; i < routes->AsArray().size(); ++i) {
+            const auto& item = routes->AsArray()[i];
+            const auto text = [&](const char* key) -> std::optional<std::wstring> {
+                const auto* v = item.IsObject() ? item.Find(key) : nullptr;
+                return v && v->IsString() ? FromUtf8(v->AsString()) : std::nullopt;
+            };
+            const auto prefix = text("prefix");
+            const auto parsed = prefix ? ParsePrefix(*prefix) : std::nullopt;
+            if (!parsed || parsed->PrefixLength == 0) {
+                return fail(std::format(L"routes[{}].prefix: ожидалась подсеть вида \"160.79.104.0/23\" "
+                                        L"(не маршрут по умолчанию)", i));
+            }
+            const auto adapter = text("adapter");
+            const auto guid = adapter ? NormalizeGuid(*adapter) : std::nullopt;
+            if (!guid) {
+                return fail(std::format(L"routes[{}].adapter: ожидался GUID интерфейса", i));
+            }
+            config.routes.push_back({FormatPrefix(*parsed), *guid});
+        }
+    }
+
     // История интерфейсов — вспомогательные данные: ошибочные записи пропускаются, а не
     // делают конфиг нечитаемым
     if (const auto* known = root->Find("knownAdapters"); known && known->IsArray()) {
@@ -319,6 +344,16 @@ std::string SerializeConfig(const Config& config)
     root.emplace_back("version", kConfigVersion);
     root.emplace_back("primary", ToUtf8(config.primary));
     root.emplace_back("rules", std::move(rules));
+    if (!config.routes.empty()) {
+        json::Array routes;
+        for (const auto& r : config.routes) {
+            json::Object o;
+            o.emplace_back("prefix", ToUtf8(r.prefix));
+            o.emplace_back("adapter", ToUtf8(r.adapter));
+            routes.emplace_back(std::move(o));
+        }
+        root.emplace_back("routes", std::move(routes));
+    }
     if (!config.knownAdapters.empty()) {
         json::Array known;
         for (const auto& a : config.knownAdapters) {

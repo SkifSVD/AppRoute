@@ -1,4 +1,4 @@
-// approute-gui — главное окно AppRoute (issues #12, #13, #14, #37).
+// approute-gui — главное окно AppRoute (issues #12, #13, #14, #15, #37).
 //
 // Список правил «программа → интерфейс», добавление, правка и удаление правил, выбор программы
 // и интерфейса из подключённых адаптеров, запуск программы по правилу. Правила хранятся в том же
@@ -12,6 +12,8 @@
 #include "resource.h"
 
 #include "core/Config.h"
+#include "core/ConfigPolicy.h"
+#include "core/ManagerPipe.h"
 #include "core/InstalledApps.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
@@ -1190,11 +1192,13 @@ void UpdatePrimaryState()
     } else {
         // Выбор сохранён, но маршруты никто не меняет — показываем, как есть на самом деле
         state = std::format(L"Сейчас трафик идёт через «{}». Менеджер маршрутов не запущен — выбор "
-                            L"применится после запуска approute-routes watch (от администратора).",
+                            L"применится после его запуска (кнопка справа).",
                             effective);
     }
 
     SetDlgItemTextW(g.main, IDC_PRIMARY_STATE, state.c_str());
+    SetDlgItemTextW(g.main, IDC_MANAGER, running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…");
+    EnableWindow(GetDlgItem(g.main, IDC_MANAGER), !g.readOnly || running);
     WrapLabel(g.main, IDC_PRIMARY_STATE);
 
     if (g.trayAdded) {
@@ -1261,6 +1265,157 @@ void OnPrimaryComboChanged()
     const int sel = static_cast<int>(SendDlgItemMessageW(g.main, IDC_PRIMARY, CB_GETCURSEL, 0, 0));
     if (sel >= 0 && static_cast<size_t>(sel) < g.primaryGuids.size()) {
         SetPrimary(g.primaryGuids[static_cast<size_t>(sel)]);
+    }
+}
+
+// --- менеджер маршрутов: запуск с согласия и остановка (#15) --------------------------------
+
+std::wstring ThisExe()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    return path;
+}
+std::wstring BinPath(const wchar_t* file)
+{
+    const std::wstring self = ThisExe();
+    return self.substr(0, self.find_last_of(L'\\') + 1) + file;
+}
+
+// Что менеджер сделает сейчас: политика из конфига и план изменений (без прав администратора)
+std::wstring DescribeManagerPlan()
+{
+    const ConfigPolicy cp = PolicyFromConfig(g.config);
+    std::wstring text;
+    if (!cp.policy) {
+        text = L"Основной интерфейс сейчас определить не удалось — менеджер будет ждать подключения.";
+    } else {
+        const RoutePolicy& p = *cp.policy;
+        text = L"Весь трафик — через «" + InterfaceName(p.primary) + L"».";
+        if (!p.ensureDefault.empty()) {
+            text += L"\nМаршрут по умолчанию с низким приоритетом — на интерфейсах правил:";
+            for (const NET_LUID l : p.ensureDefault) {
+                text += L" «" + InterfaceName(l) + L"»";
+            }
+        }
+        for (const PinnedRoute& r : p.pinned) {
+            text += L"\nПодсеть " + FormatPrefix(r.prefix) + L" — всегда через «" + InterfaceName(r.luid) + L"».";
+        }
+        try {
+            const RoutePlan plan = RouteManager(p).Plan();
+            text += L"\n\nИзменения сейчас:";
+            if (plan.changes.empty()) {
+                text += L" не нужны — система уже соответствует.";
+            }
+            for (const RouteChange& c : plan.changes) {
+                text += L"\n• " + c.description;
+            }
+            for (const std::wstring& w : plan.warnings) {
+                text += L"\n⚠ " + w;
+            }
+        } catch (...) {
+        }
+    }
+    for (const std::wstring& n : cp.notes) {
+        text += L"\n⚠ " + n;
+    }
+    return text;
+}
+
+HRESULT CALLBACK ConsentCallback(HWND dialog, UINT msg, WPARAM, LPARAM, LONG_PTR)
+{
+    if (msg == TDN_CREATED) {
+        SendMessageW(dialog, TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, 100, TRUE);   // щит UAC
+    }
+    return S_OK;
+}
+
+// Явное согласие: что именно будет изменено, что это временно, затем — запрос UAC
+void StartManager()
+{
+    if (g.readOnly || IsRouteManagerRunning()) {
+        return;
+    }
+    LoadAdapters();
+    const std::wstring details = DescribeManagerPlan();
+    const TASKDIALOG_BUTTON buttons[] = {
+        {100, L"Запустить менеджер маршрутов\nWindows попросит подтвердить права администратора"},
+        {101, L"Не запускать"},
+    };
+    TASKDIALOGCONFIG tdc{};
+    tdc.cbSize = sizeof(tdc);
+    tdc.hwndParent = g.main;
+    tdc.hInstance = g.instance;
+    tdc.dwFlags = TDF_USE_COMMAND_LINKS | TDF_EXPANDED_BY_DEFAULT | TDF_ALLOW_DIALOG_CANCELLATION |
+                  TDF_POSITION_RELATIVE_TO_WINDOW;
+    tdc.pszWindowTitle = L"AppRoute";
+    tdc.pszMainIcon = TD_SHIELD_ICON;
+    tdc.pszMainInstruction = L"Запустить менеджер маршрутов?";
+    tdc.pszContent =
+        L"Менеджер маршрутов держит маршрут в интернет на выбранном интерфейсе («весь трафик через») и даёт "
+        L"программам с правилами выход через их интерфейсы. Он меняет метрики интерфейсов и маршруты Windows, "
+        L"поэтому ему нужны права администратора.\n\n"
+        L"Изменения временные: всё откатывается при остановке менеджера (здесь или в меню значка) и не "
+        L"переживает перезагрузку. Чужие маршруты VPN-клиентов не удаляются, только получают меньший приоритет.";
+    tdc.pszExpandedInformation = details.c_str();
+    tdc.pszExpandedControlText = L"Скрыть подробности";
+    tdc.pszCollapsedControlText = L"Что будет изменено";
+    tdc.pButtons = buttons;
+    tdc.cButtons = static_cast<UINT>(std::size(buttons));
+    tdc.nDefaultButton = 101;
+    tdc.pfCallback = ConsentCallback;
+    int choice = 0;
+    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, nullptr)) || choice != 100) {
+        SetStatus(L"Менеджер маршрутов не запущен");
+        return;
+    }
+
+    // Канал менеджера будет доступен только этому пользователю (и его окну approute-gui)
+    const std::wstring routes = BinPath(L"approute-routes.exe");
+    const std::wstring params =
+        L"serve --config " + QuoteArgument(g.configPath) + L" --client-sid " + CurrentUserSid();
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.hwnd = g.main;
+    sei.lpVerb = L"runas";
+    sei.lpFile = routes.c_str();
+    sei.lpParameters = params.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei)) {
+        const DWORD error = GetLastError();
+        SetStatus(error == ERROR_CANCELLED ? L"Запуск менеджера маршрутов отменён"
+                                           : L"Менеджер маршрутов не запущен: " + Win32ErrorMessage(error));
+        return;
+    }
+    SetStatus(L"Менеджер маршрутов запущен · журнал: %LOCALAPPDATA%\\AppRoute\\routes.log");
+    Sleep(500);
+    RefreshStates();
+}
+
+void StopManager()
+{
+    const ManagerReply reply = CallManager(ManagerPipeName(), "STOP", BinPath(L"approute-routes.exe"));
+    if (!reply.ok) {
+        Message(g.main, L"Не удалось остановить менеджер маршрутов: " + reply.error +
+                            L"\n\nЕсли он запущен из консоли (approute-routes watch), остановите его там: Ctrl+C.",
+                MB_ICONWARNING);
+        return;
+    }
+    // Менеджер откатывает изменения и завершается
+    for (int i = 0; i < 20 && IsRouteManagerRunning(); ++i) {
+        Sleep(200);
+    }
+    SetStatus(L"Менеджер маршрутов остановлен, изменения маршрутов откачены");
+    RefreshStates();
+}
+
+void ToggleManager()
+{
+    if (IsRouteManagerRunning()) {
+        StopManager();
+    } else {
+        StartManager();
     }
 }
 
@@ -1339,6 +1494,10 @@ void ShowTrayMenu()
                            IDM_PRIMARY_FIRST + static_cast<UINT>(PrimaryIndex()), MF_BYCOMMAND);
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const bool running = IsRouteManagerRunning();
+    AppendMenuW(menu, MF_STRING | (g.readOnly && !running ? MF_GRAYED : 0), IDM_TRAY_MANAGER,
+                running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"&Открыть AppRoute");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"&Выход");
     SetMenuDefaultItem(menu, IDM_TRAY_OPEN, FALSE);
@@ -1349,7 +1508,12 @@ void ShowTrayMenu()
     const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main,
                                        nullptr);
     DestroyMenu(menu);
-    if (choice == IDM_TRAY_OPEN) {
+    if (choice == IDM_TRAY_MANAGER) {
+        if (!running) {
+            ShowMain();   // окно согласия — поверх главного окна
+        }
+        ToggleManager();
+    } else if (choice == IDM_TRAY_OPEN) {
         ShowMain();
     } else if (choice == IDM_TRAY_EXIT) {
         DestroyWindow(g.main);
@@ -1441,12 +1605,6 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id)
     return out;
 }
 
-std::wstring ThisExe()
-{
-    std::wstring path(32768, L'\0');
-    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
-    return path;
-}
 
 // Ярлык запуска программы правила через AppRoute (#13): на рабочем столе или в меню «Пуск»
 void CreateShortcutForSelected()
@@ -1525,12 +1683,16 @@ void Layout()
     const int listW = std::max(0, buttonsX - gap * 2 - margin);
     const int listH = std::max(0, static_cast<int>(client.bottom) - listTop - margin - statusH - gap);
 
-    HDWP dwp = BeginDeferWindowPos(12);
+    HDWP dwp = BeginDeferWindowPos(13);
     auto place = [&](int id, int x, int y, int w, int h) {
         dwp = DeferWindowPos(dwp, GetDlgItem(g.main, id), nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    const int comboW = std::min<int>(top.right, std::max<int>(0, listW + margin - top.left));
+    const RECT managerButton = DialogUnits(6, 6, 130, 14);   // промежуток, y, ширина, высота
+    const int managerW = managerButton.right;
+    const int comboW = std::min<int>(top.right, std::max<int>(0, static_cast<int>(client.right) - margin - managerW -
+                                                                     managerButton.left - top.left));
     place(IDC_PRIMARY, top.left, top.top, comboW, DialogUnits(0, 0, 0, 200).bottom);   // высота — с выпадающим списком
+    place(IDC_MANAGER, top.left + comboW + managerButton.left, managerButton.top, managerW, managerButton.bottom);
     place(IDC_PRIMARY_STATE, margin, stateRow.top, std::max(0, static_cast<int>(client.right) - margin * 2), stateRow.bottom);
     place(IDC_RULES, margin, listTop, listW, listH);
     int y = listTop;
@@ -1668,6 +1830,9 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         case IDC_SHORTCUT:
             CreateShortcutForSelected();
+            return TRUE;
+        case IDC_MANAGER:
+            ToggleManager();
             return TRUE;
         case IDC_PRIMARY:
             if (HIWORD(wp) == CBN_SELCHANGE) {

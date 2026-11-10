@@ -17,6 +17,7 @@ FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
     LTEXT           "Весь &трафик через:", IDC_PRIMARY_LABEL, 7, 9, 70, 9
     COMBOBOX        IDC_PRIMARY, 80, 7, 200, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Запустить &менеджер маршрутов…", IDC_MANAGER, 286, 6, 120, 14
     LTEXT           "", IDC_PRIMARY_STATE, 7, 23, 456, 18, SS_NOPREFIX
     CONTROL         "", IDC_RULES, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP, 7, 7, 396, 200
     PUSHBUTTON      "&Добавить…", IDC_ADD, 410, 7, 53, 14

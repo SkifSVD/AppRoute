@@ -22,6 +22,8 @@
 #define IDC_PRIMARY         1009
 #define IDC_PRIMARY_LABEL   1010
 #define IDC_PRIMARY_STATE   1011
+#define IDC_MANAGER         1012
+#define IDM_TRAY_MANAGER    1063
 #define IDM_SHORTCUT_DESKTOP 1051
 #define IDM_TRAY_OPEN       1061
 #define IDM_TRAY_EXIT       1062

@@ -15,6 +15,8 @@ add_library(approute_core STATIC
     Shortcuts.h     Shortcuts.cpp
     Com.h
     PrimarySwitch.h PrimarySwitch.cpp
+    ConfigPolicy.h  ConfigPolicy.cpp
+    ManagerPipe.h   ManagerPipe.cpp
     Policy.h
 )
 
