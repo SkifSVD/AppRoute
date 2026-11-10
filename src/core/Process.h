@@ -38,8 +38,24 @@ bool ProcessUserMatchesCurrent(HANDLE process);
 // NO_ERROR или код ошибки (ERROR_MOD_NOT_FOUND — LoadLibraryW вернул NULL).
 DWORD InjectDll(HANDLE process, const std::wstring& dllPath, DWORD timeoutMs = 15000);
 
+// Имена файлов AppRoute в папке программы (binDir — с завершающим "\").
+std::wstring HookDllPath(const std::wstring& binDir, bool for32Bit);
+std::wstring InjectHelperPath(const std::wstring& binDir, bool for32Bit);
+
+// Вспомогательный инжектор AppRoute (approute-inject32/64.exe): в него правило не внедряется.
+bool IsAppRouteHelper(std::wstring_view imagePathOrName);
+
+// Внедрить hook-DLL нужной разрядности. Процесс той же разрядности — напрямую, другой —
+// через approute-inject32/64.exe из binDir: ему передаётся (наследуется) копия уже открытого
+// описателя процесса, так что помощник не получает прав сверх тех, что есть у вызывающего.
+DWORD InjectRuleDll(HANDLE process, const std::wstring& binDir, DWORD timeoutMs = 15000);
+
+// Папка модуля (exe или dll), содержащего адрес, с завершающим "\".
+std::wstring ModuleDirectory(const void* addressInModule);
+
 // Новый Unicode-блок окружения: все переменные исходного блока, кроме перечисленных в vars
-// (без учёта регистра), плюс vars. unicode=false — исходный блок в кодировке ANSI.
+// (без учёта регистра), плюс vars с непустым значением (пустое — удалить переменную).
+// unicode=false — исходный блок в кодировке ANSI.
 std::vector<wchar_t> MergeEnvironment(const void* block, bool unicode, const EnvVars& vars);
 
 } // namespace approute

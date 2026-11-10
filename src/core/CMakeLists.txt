@@ -9,6 +9,8 @@ add_library(approute_core STATIC
     DnsResolver.h   DnsResolver.cpp
     Json.h          Json.cpp
     Config.h        Config.cpp
+    Launcher.h      Launcher.cpp
+    Policy.h
 )
 
 target_include_directories(approute_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

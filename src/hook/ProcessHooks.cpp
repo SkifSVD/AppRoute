@@ -29,7 +29,7 @@ decltype(&::CreateProcessWithTokenW) Real_CreateProcessWithTokenW = &::CreatePro
 decltype(&::CreateProcessWithLogonW) Real_CreateProcessWithLogonW = &::CreateProcessWithLogonW;
 
 RuleConfig g_config;
-std::wstring g_dllPath;
+std::wstring g_binDir;   // папка hook-DLL обеих разрядностей и помощников
 
 // Дети, которых родитель сам создал приостановленными (песочница Chromium, другие инжекторы):
 // родитель ещё готовит процесс, поэтому внедряемся только в момент его ResumeThread.
@@ -102,17 +102,17 @@ void InjectChild(HANDLE process, DWORD pid, const std::wstring& name)
             (image.empty() ? name : image).c_str());
         return;
     }
+    if (IsAppRouteHelper(image)) {
+        return;   // собственный помощник AppRoute для внедрения в процессы другой разрядности
+    }
     if (!ProcessUserMatchesCurrent(process)) {
         Log(L"дочерний процесс %lu пропущен (другой пользователь): %ls", pid, name.c_str());
         return;
     }
-    if (IsProcessWow64(process)) {
-        Log(L"дочерний процесс %lu (32-бит) без правила — не поддерживается (#7): %ls", pid, name.c_str());
-        return;
-    }
-    const DWORD rc = InjectDll(process, g_dllPath, 10000);
+    const bool child32 = IsProcessWow64(process);
+    const DWORD rc = InjectRuleDll(process, g_binDir, 10000);
     if (rc == NO_ERROR) {
-        Log(L"дочерний процесс %lu: правило применено: %ls", pid, name.c_str());
+        Log(L"дочерний процесс %lu%ls: правило применено: %ls", pid, child32 ? L" (32-бит)" : L"", name.c_str());
     } else {
         Log(L"дочерний процесс %lu: внедрение не удалось (%ls): %ls", pid, Win32ErrorMessage(rc).c_str(), name.c_str());
     }
@@ -271,7 +271,7 @@ void CreateProcessHooks(const RuleConfig& config)
         Log(L"дочерние процессы: правило не распространяется (%ls=0)", kEnvChildren);
         return;
     }
-    g_dllPath = OwnModulePath();
+    g_binDir = ModuleDirectory(reinterpret_cast<const void*>(&OwnModulePath));
 
     const MH_STATUS st = MH_CreateHookApi(L"kernelbase", "CreateProcessInternalW",
         reinterpret_cast<LPVOID>(&Hook_CreateProcessInternalW),

@@ -5,9 +5,10 @@
 // Без --adapter правило для программы берётся из конфига (%APPDATA%\AppRoute\config.json, #11).
 // Программа стартует приостановленной, в неё внедряется approute-hook64.dll, затем она
 // продолжает работу. Правило передаётся через переменные окружения; дочерние процессы
-// получают его от hook-DLL (#8). Полноценный launcher (x86) — issue #7.
+// получают его от hook-DLL (#8). 32-битные программы — через approute-inject32.exe (#7).
 
 #include "core/Config.h"
+#include "core/Launcher.h"
 #include "core/NetAdapters.h"
 #include "core/Policy.h"
 #include "core/Process.h"
@@ -134,35 +135,6 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
     return o;
 }
 
-// Полный путь программы из командной строки — так же, как её найдёт CreateProcess
-// (для поиска правила в конфиге до запуска: правило передаётся через окружение).
-std::wstring ResolveProgram(const std::wstring& commandLine)
-{
-    std::wstring token;
-    if (!commandLine.empty() && commandLine.front() == L'"') {
-        const auto end = commandLine.find(L'"', 1);
-        token = commandLine.substr(1, end == std::wstring::npos ? std::wstring::npos : end - 1);
-    } else {
-        token = commandLine.substr(0, commandLine.find_first_of(L" \t"));
-    }
-    wchar_t full[MAX_PATH * 2] = {};
-    const DWORD n = SearchPathW(nullptr, token.c_str(), L".exe", static_cast<DWORD>(std::size(full)),
-                                full, nullptr);
-    if (n > 0 && n < std::size(full)) {
-        return full;
-    }
-    return token;
-}
-
-std::wstring HookDllPath()
-{
-    wchar_t self[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring path = self;
-    path.resize(path.find_last_of(L"\\/") + 1);
-    return path + L"approute-hook64.dll";
-}
-
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -183,7 +155,7 @@ int wmain(int argc, wchar_t** argv)
             Line(std::format(L"Ошибка конфига: {}", error));
             return 1;
         }
-        const std::wstring program = ResolveProgram(options->commandLine);
+        const std::wstring program = ResolveProgramPath(options->commandLine);
         const auto* found = FindRule(*config, program);
         if (!found) {
             Line(std::format(L"Ошибка: нет правила для «{}» в {} — укажите --adapter или добавьте",
@@ -233,79 +205,33 @@ int wmain(int argc, wchar_t** argv)
         Line(L"перезапускают себя без прав; AppRoute отслеживает это, но надёжнее обычный терминал.");
     }
 
-    const auto dll = HookDllPath();
-    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        Line(std::format(L"Ошибка: не найдена {}", dll));
-        return 1;
-    }
-
     // Прозрачность: явно сообщаем, что и куда направляется
     Line(std::format(L"AppRoute: трафик «{}»{} идёт через интерфейс «{}».",
                      options->commandLine,
                      options->children ? L" и его дочерних процессов" : L"",
                      adapterLabel));
 
-    // Правило — через окружение: его унаследуют и дочерние процессы (issue #8)
-    SetEnvironmentVariableW(kEnvAdapter, adapterGuid.c_str());
-    SetEnvironmentVariableW(kEnvLog, options->log.empty() ? nullptr : options->log.c_str());
-    SetEnvironmentVariableW(kEnvChildren, options->children ? nullptr : L"0");
-    if (rule && rule->dns == DnsMode::System) {
-        SetEnvironmentVariableW(kEnvDns, L"system");
-    }
-    SetEnvironmentVariableW(kEnvOnUnavailable, OnUnavailableEnvValue(policy.onUnavailable));
-    SetEnvironmentVariableW(kEnvIpv6, Ipv6EnvValue(policy.ipv6));
-
-    std::wstring commandLine = options->commandLine;
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    // Как при обычном запуске из консоли: программа (в т.ч. GUI) получает наши stdin/stdout/stderr
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
-                        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi)) {
-        Line(std::format(L"Ошибка запуска: {}", Win32ErrorMessage(GetLastError())));
+    LaunchRequest request;
+    request.commandLine = options->commandLine;
+    request.adapterGuid = adapterGuid;
+    request.logPath = options->log;
+    request.includeChildren = options->children;
+    request.systemDns = rule && rule->dns == DnsMode::System;
+    request.policy = policy;
+    auto launched = LaunchWithRule(request);
+    if (!launched.Ok()) {
+        Line(launched.message);
         return 1;
     }
-
-    // Защитная граница: AppRoute не вмешивается в защитное ПО и системные процессы
-    const std::wstring image = GetProcessImageName(pi.hProcess);
-    if (IsProtectedExecutable(image)) {
-        Line(std::format(L"Отказ: {} — защитное или системное ПО, AppRoute в него не вмешивается.",
-                         image));
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return 1;
+    if (launched.is32Bit) {
+        Line(L"(32-битная программа)");
     }
-
-    if (IsProcessWow64(pi.hProcess)) {
-        Line(L"Ошибка: 32-битные программы пока не поддерживаются (issue #7)");
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return 1;
-    }
-
-    const DWORD rc = InjectDll(pi.hProcess, dll);
-    if (rc != NO_ERROR) {
-        Line(std::format(L"Ошибка внедрения DLL: {}", Win32ErrorMessage(rc)));
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return 1;
-    }
-
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
 
     DWORD exitCode = 0;
     if (options->wait) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        GetExitCodeProcess(pi.hProcess, &exitCode);
+        WaitForSingleObject(launched.process, INFINITE);
+        GetExitCodeProcess(launched.process, &exitCode);
     }
-    CloseHandle(pi.hProcess);
+    CloseHandle(launched.process);
     return static_cast<int>(exitCode);
 }
