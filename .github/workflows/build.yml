@@ -23,6 +23,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       # build.ps1 сам найдёт cmake из установленной Visual Studio
       - name: Build
@@ -31,4 +33,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: approute-x64
-          path: build/**/Release/*.exe
+          path: |
+            build/bin/Release/*.exe
+            build/bin/Release/*.dll

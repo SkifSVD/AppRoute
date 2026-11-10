@@ -6,8 +6,9 @@
 
 *Per-application network interface routing for Windows 10/11.*
 
-> **Статус:** ранний прототип. Готов консольный менеджер маршрутов; привязка приложений
-> (hook-DLL) и GUI — в работе.
+> **Статус:** ранний прототип. Готовы консольный менеджер маршрутов и привязка TCP/UDP
+> приложений через hook-DLL (x64); DNS, конфиг и GUI — в работе
+> ([план](https://github.com/SkifSVD/AppRoute/milestones)).
 
 ## Проблема
 
@@ -33,10 +34,12 @@
 ## Сборка
 
 Нужны Visual Studio 2022+ с компонентом «Разработка классических приложений на C++» и CMake
-(входит в VS).
+(входит в VS). Зависимость [MinHook](https://github.com/TsudaKageyu/minhook) подключена
+git-подмодулем.
 
 ```powershell
-./build.ps1            # Release
+git clone --recurse-submodules https://github.com/SkifSVD/AppRoute.git
+./build.ps1            # Release → build/bin/Release
 ./build.ps1 -Config Debug
 ```
 
@@ -44,6 +47,20 @@
 
 Сборка выполняется на self-hosted runner с метками `self-hosted, Windows, X64, approute`
 (нужны Visual Studio с C++ и PowerShell 7). Пока runner не запущен, задания ждут в очереди.
+
+## approute-run (запуск программы через интерфейс)
+
+```powershell
+approute-run --adapter happ-xray -- "C:\Program Files\App\app.exe" --some-arg
+approute-run --adapter "Беспроводная сеть" --log C:\temp\approute.log -- curl.exe https://ifconfig.me/ip
+```
+
+Программа запускается с `approute-hook64.dll`, которая перед каждым соединением привязывает
+сокет к IP выбранного интерфейса (`connect`, `WSAConnect`, `ConnectEx`, `sendto`, `WSASendTo`,
+`WSASendMsg`, `bind` на «любой адрес»). Локальная сеть, loopback и подсети других интерфейсов
+не перенаправляются. Если у интерфейса нет адреса нужного семейства, соединение блокируется.
+Права администратора не нужны, но у интерфейса должен быть маршрут `0/0` (см. `--ensure-default`
+ниже). Пока только 64-битные программы.
 
 ## approute-routes (прототип менеджера маршрутов)
 
