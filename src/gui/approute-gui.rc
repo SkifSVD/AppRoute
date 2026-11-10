@@ -49,6 +49,42 @@ BEGIN
     PUSHBUTTON      "Отмена", IDCANCEL, 273, 165, 50, 14
 END
 
+// Мастер «Новое правило» (Aero Wizard): шаг 1 — программа
+IDD_WIZ_APP DIALOGEX 0, 0, 310, 170
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    EDITTEXT        IDC_WAPP_SEARCH, 0, 0, 310, 13, ES_AUTOHSCROLL
+    CONTROL         "", IDC_WAPP_LIST, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_SHAREIMAGELISTS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 0, 17, 310, 112
+    LTEXT           "", IDC_WAPP_CHOSEN, 0, 133, 310, 9, SS_PATHELLIPSIS | SS_NOPREFIX
+    PUSHBUTTON      "&Указать файл или ярлык…", IDC_WAPP_BROWSE, 0, 150, 112, 14
+    LTEXT           "если программы нет в списке", IDC_WAPP_HINT, 118, 153, 192, 9
+END
+
+// Шаг 2 — интерфейс
+IDD_WIZ_ADAPTER DIALOGEX 0, 0, 310, 170
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Программа будет выходить в сеть только через выбранный интерфейс, остальные программы — как обычно.", IDC_WIF_HINT, 0, 0, 310, 18
+    CONTROL         "", IDC_WIF_LIST, WC_LISTVIEW, LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 0, 21, 310, 128
+    LTEXT           "", IDC_WIF_INFO, 0, 153, 310, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+END
+
+// Шаг 3 — если интерфейс недоступен
+IDD_WIZ_POLICY DIALOGEX 0, 0, 310, 170
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    // Переключатели подряд: подпись (LTEXT, WS_GROUP) между ними разорвала бы группу
+    AUTORADIOBUTTON "&Блокировать", IDC_WPOL_BLOCK, 0, 0, 310, 10, WS_GROUP | WS_TABSTOP
+    AUTORADIOBUTTON "Пустить &обычным маршрутом", IDC_WPOL_DEFAULT, 0, 38, 310, 10
+    LTEXT           "Пока интерфейс не подключён, программа остаётся без сети. Её трафик никогда не уйдёт через другое подключение.", IDC_WPOL_BLOCK_TEXT, 12, 12, 298, 18
+    LTEXT           "Пока интерфейс не подключён, программа работает как без AppRoute. Когда он появится, новые соединения пойдут через него.", IDC_WPOL_DEFAULT_TEXT, 12, 50, 298, 18
+    LTEXT           "", IDC_WPOL_SUMMARY, 0, 84, 310, 28, SS_NOPREFIX
+    LTEXT           "DNS, IPv6 и дочерние процессы получат настройки по умолчанию; поменять их можно потом кнопкой «Изменить…».", IDC_WPOL_MORE, 0, 146, 310, 18
+END
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,1,0,0
  PRODUCTVERSION 0,1,0,0
