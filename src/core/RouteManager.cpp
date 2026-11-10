@@ -58,17 +58,65 @@ RouteManager::RouteManager(RoutePolicy policy)
 {
 }
 
+// --- NetworkSnapshot ---------------------------------------------------------------------------
+
+NetworkSnapshot NetworkSnapshot::Capture()
+{
+    NetworkSnapshot s;
+    for (const ADDRESS_FAMILY family : {ADDRESS_FAMILY{AF_INET}, ADDRESS_FAMILY{AF_INET6}}) {
+        auto routes = GetRoutes(family);
+        s.routes.insert(s.routes.end(), routes.begin(), routes.end());
+    }
+    PMIB_IPINTERFACE_TABLE table = nullptr;
+    if (GetIpInterfaceTable(AF_UNSPEC, &table) == NO_ERROR) {
+        for (ULONG i = 0; i < table->NumEntries; ++i) {
+            const auto& row = table->Table[i];
+            s.interfaces.push_back({row.InterfaceLuid, row.Family, row.Metric, row.UseAutomaticMetric != FALSE});
+        }
+        FreeMibTable(table);
+    }
+    return s;
+}
+
+const InterfaceMetric* NetworkSnapshot::FindInterface(NET_LUID luid, ADDRESS_FAMILY family) const
+{
+    for (const auto& i : interfaces) {
+        if (SameLuid(i.luid, luid) && i.family == family) {
+            return &i;
+        }
+    }
+    return nullptr;
+}
+
+ULONG64 NetworkSnapshot::EffectiveMetric(const MIB_IPFORWARD_ROW2& route) const
+{
+    const auto* iface = FindInterface(route.InterfaceLuid, route.DestinationPrefix.Prefix.si_family);
+    return static_cast<ULONG64>(route.Metric) + (iface ? iface->metric : 0);
+}
+
+// --- RouteManager ------------------------------------------------------------------------------
+
 RoutePlan RouteManager::Plan() const
 {
+    return Plan(NetworkSnapshot::Capture());
+}
+
+RoutePlan RouteManager::Plan(const NetworkSnapshot& snapshot) const
+{
     RoutePlan plan;
-    PlanFamily(AF_INET, plan);
-    PlanFamily(AF_INET6, plan);
+    PlanFamily(snapshot, AF_INET, plan);
+    PlanFamily(snapshot, AF_INET6, plan);
     return plan;
 }
 
-void RouteManager::PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const
+void RouteManager::PlanFamily(const NetworkSnapshot& snapshot, ADDRESS_FAMILY family, RoutePlan& plan) const
 {
-    const auto routes = GetRoutes(family);
+    std::vector<MIB_IPFORWARD_ROW2> routes;
+    for (const auto& r : snapshot.routes) {
+        if (r.DestinationPrefix.Prefix.si_family == family) {
+            routes.push_back(r);
+        }
+    }
     const NET_LUID primary = policy_.primary;
 
     // 1. Чем "держится" основной интерфейс.
@@ -79,7 +127,7 @@ void RouteManager::PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const
             continue;
         }
         if (IsDefaultRoute(r)) {
-            const auto m = EffectiveMetric(r);
+            const auto m = snapshot.EffectiveMetric(r);
             primaryBest = primaryBest ? std::min(*primaryBest, m) : m;
         } else if (IsSplitDefaultRoute(r)) {
             primaryHasSplit = true;
@@ -142,7 +190,7 @@ void RouteManager::PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const
         if (SameLuid(luid, primary) || secondaryDefaults.contains(luid.Value)) {
             continue;
         }
-        if (!GetIpInterface(luid, family)) {
+        if (!snapshot.FindInterface(luid, family)) {
             if (family == AF_INET) {
                 plan.warnings.push_back(std::format(L"IPv4: интерфейс [{}] недоступен", InterfaceName(luid)));
             }
@@ -166,11 +214,11 @@ void RouteManager::PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const
     for (const auto& [luidValue, routeMetric] : secondaryDefaults) {
         NET_LUID luid{};
         luid.Value = luidValue;
-        const auto iface = GetIpInterface(luid, family);
+        const auto* iface = snapshot.FindInterface(luid, family);
         if (!iface) {
             continue;
         }
-        if (static_cast<ULONG64>(routeMetric) + iface->Metric > threshold) {
+        if (static_cast<ULONG64>(routeMetric) + iface->metric > threshold) {
             continue;
         }
         const ULONG64 wanted = std::max<ULONG64>(policy_.secondaryMetric, threshold + 100);
@@ -178,11 +226,11 @@ void RouteManager::PlanFamily(ADDRESS_FAMILY family, RoutePlan& plan) const
         change.kind = ChangeKind::SetInterfaceMetric;
         change.luid = luid;
         change.family = family;
-        change.oldMetric = iface->Metric;
-        change.oldAutomatic = iface->UseAutomaticMetric != FALSE;
+        change.oldMetric = iface->metric;
+        change.oldAutomatic = iface->automatic;
         change.newMetric = static_cast<ULONG>(std::min<ULONG64>(wanted, std::numeric_limits<ULONG>::max()));
         change.description = std::format(L"{}: метрика интерфейса [{}] {}{} → {}",
-            FamilyName(family), InterfaceName(luid), iface->Metric,
+            FamilyName(family), InterfaceName(luid), iface->metric,
             change.oldAutomatic ? L" (авто)" : L"", change.newMetric);
         plan.changes.push_back(std::move(change));
     }
