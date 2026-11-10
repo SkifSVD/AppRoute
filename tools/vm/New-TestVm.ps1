@@ -6,8 +6,9 @@
     Неподписанный драйвер Windows загружает только в тестовом режиме (testsigning), а его не
     стоит включать на рабочей системе. Поэтому драйвер проверяется в отдельной ВМ.
 
-    Что делает скрипт: создаёт ВМ 2-го поколения (TPM, 4 ГБ памяти, 2 процессора, диск 64 ГБ),
-    подключает её к «Default Switch» (NAT через сеть компьютера), вставляет ISO и включает
+    Что делает скрипт: создаёт ВМ 2-го поколения (TPM, 4 ГБ памяти, 2 процессора, диск 64 ГБ)
+    с двумя сетевыми картами в «Default Switch» (NAT через сеть компьютера) — правило направляет
+    программу во вторую, и видно, что трафик ушёл не через основную; вставляет ISO и включает
     службу гостевого копирования (Copy-VMFile). Существующую ВМ с тем же именем не трогает.
 
     Пример:  ./tools/vm/New-TestVm.ps1 -Iso D:\iso\Win11_Eval.iso
@@ -51,6 +52,8 @@ $vhd = Join-Path $Path "$Name.vhdx"
 New-VM -Name $Name -Generation 2 -MemoryStartupBytes 4GB -NewVHDPath $vhd -NewVHDSizeBytes 64GB `
     -SwitchName 'Default Switch' -Path $Path | Out-Null
 Set-VMProcessor -VMName $Name -Count 2
+# Вторая сетевая карта: в неё правило направляет тестовую программу
+Add-VMNetworkAdapter -VMName $Name -SwitchName 'Default Switch' -Name 'AppRoute second'
 Set-VMMemory -VMName $Name -DynamicMemoryEnabled $true -MinimumBytes 2GB -MaximumBytes 6GB
 # Windows 11 требует TPM 2.0 и безопасную загрузку при установке
 Set-VMKeyProtector -VMName $Name -NewLocalKeyProtector
@@ -69,3 +72,4 @@ Write-Host '     любую клавишу, когда появится «Press 
 Write-Host '  2. Установите Windows (учётная запись — локальная, ключ продукта не нужен).'
 Write-Host "  3. Выключите ВМ и выполните: ./tools/vm/New-TestVm.ps1 -Name $Name -AfterInstall"
 Write-Host '  4. Сделайте контрольную точку «чистая система» — к ней удобно возвращаться после проверок.'
+Write-Host '  5. Файлы для проверки — ./tools/vm/Copy-TestKit.ps1 (с этого компьютера).'
