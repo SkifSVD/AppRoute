@@ -2,7 +2,8 @@
 // Windows (strong host model) отправляет пакеты привязанного сокета только маршрутами этого
 // интерфейса, поэтому трафик уходит через него, какой бы интерфейс ни был основным.
 //
-// Политика при недоступном интерфейсе пока одна — block (WSAENETUNREACH); настройка — issue #9.
+// Если у интерфейса нет адреса нужного семейства (VPN отключён, нет IPv6), поведение задаёт
+// правило (#9): block — WSAENETUNREACH, default — соединение идёт маршрутом по умолчанию.
 
 #include "Hooks.h"
 #include "AdapterResolver.h"
@@ -10,6 +11,7 @@
 #include "Log.h"
 #include "ProcessHooks.h"
 
+#include "core/Policy.h"
 #include "core/Process.h"
 #include "core/Util.h"
 
@@ -27,6 +29,7 @@ namespace approute::hook {
 namespace {
 
 AdapterResolver g_resolver;
+UnavailablePolicy g_policy;
 bool g_installed = false;
 
 // Оригиналы. До установки перехватов указывают на сами функции Winsock.
@@ -178,8 +181,16 @@ bool PrepareSocket(SOCKET s, const sockaddr* dest, int destLen, const wchar_t* a
     sockaddr_storage src{};
     int srcLen = 0;
     if (!MakeBindAddress(d.si_family, target.si_family, deferredPort.value_or(0), src, srcLen)) {
-        Log(L"%ls → %ls: заблокировано, у интерфейса нет адреса %ls",
-            api, Describe(target).c_str(), target.si_family == AF_INET ? L"IPv4" : L"IPv6");
+        const wchar_t* family = target.si_family == AF_INET ? L"IPv4" : L"IPv6";
+        if (g_policy.UseDefaultRoute(target.si_family == AF_INET6)) {
+            Log(L"%ls → %ls: у интерфейса нет адреса %ls — маршрутом по умолчанию (default)",
+                api, Describe(target).c_str(), family);
+            if (deferredPort) {
+                BindDeferredAsRequested(s, *deferredPort);
+            }
+            return true;
+        }
+        Log(L"%ls → %ls: заблокировано, у интерфейса нет адреса %ls", api, Describe(target).c_str(), family);
         WSASetLastError(WSAENETUNREACH);
         return false;
     }
@@ -282,6 +293,9 @@ int WSAAPI Hook_bind(SOCKET s, const sockaddr* name, int namelen)
     sockaddr_storage src{};
     int srcLen = 0;
     if (!MakeBindAddress(a.si_family, a.si_family, PortOf(a), src, srcLen)) {
+        if (g_policy.UseDefaultRoute(a.si_family == AF_INET6)) {
+            return Real_bind(s, name, namelen);   // как просил процесс (default)
+        }
         Log(L"bind %ls: заблокировано, у интерфейса нет адреса %ls",
             Describe(a).c_str(), a.si_family == AF_INET ? L"IPv4" : L"IPv6");
         WSASetLastError(WSAEADDRNOTAVAIL);
@@ -371,6 +385,8 @@ void Install()
         return;
     }
 
+    g_policy = PolicyFromEnvironment();
+
     RuleConfig config;
     config.adapterGuid = guid;
     wchar_t buffer[MAX_PATH] = {};
@@ -399,7 +415,7 @@ void Install()
     HookApi("getsockname", &Hook_getsockname, &Real_getsockname);
     HookApi("listen", &Hook_listen, &Real_listen);
     HookApi("closesocket", &Hook_closesocket, &Real_closesocket);
-    CreateDnsHooks(g_resolver);
+    CreateDnsHooks(g_resolver, g_policy);
     CreateProcessHooks(config);
 
     const MH_STATUS st = MH_EnableHook(MH_ALL_HOOKS);
@@ -408,7 +424,8 @@ void Install()
         return;
     }
     g_installed = true;
-    Log(L"активен в %ls, интерфейс %ls", exe, guid);
+    Log(L"активен в %ls, интерфейс %ls, без интерфейса: %ls", exe, guid,
+        g_policy.onUnavailable == OnUnavailable::Default ? L"default" : L"block");
 }
 
 void Uninstall()

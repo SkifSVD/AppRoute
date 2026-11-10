@@ -9,6 +9,7 @@
 
 #include "core/Config.h"
 #include "core/NetAdapters.h"
+#include "core/Policy.h"
 #include "core/Process.h"
 #include "core/Util.h"
 
@@ -46,12 +47,16 @@ void PrintUsage()
 {
     Line(L"approute-run — запуск программы через выбранный сетевой интерфейс");
     Line(L"");
-    Line(L"  approute-run [--adapter IF] [--config FILE] [--log FILE] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
+    Line(L"  approute-run [--adapter IF] [--config FILE] [--log FILE] [--on-unavailable block|default]");
+    Line(L"               [--ipv6 follow|block|default] [--no-children] [--no-wait] -- PROGRAM [ARGS...]");
     Line(L"");
     Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list);");
     Line(L"                 без --adapter правило берётся из конфига (см. approute-config)");
     Line(L"  --config       файл конфига вместо %APPDATA%\\AppRoute\\config.json");
     Line(L"  --log          журнал hook-DLL (все процессы пишут в один файл)");
+    Line(L"  --on-unavailable  если у интерфейса нет адреса (VPN отключён): block — блокировать");
+    Line(L"                 соединения и DNS (по умолчанию), default — маршрутом по умолчанию");
+    Line(L"  --ipv6         IPv6 без IPv6-адреса у интерфейса: follow (как --on-unavailable), block, default");
     Line(L"  --no-children  не применять правило к дочерним процессам");
     Line(L"  --no-wait      не ждать завершения программы");
 }
@@ -62,6 +67,8 @@ struct Options {
     std::wstring log;
     bool wait = true;
     bool children = true;
+    std::optional<OnUnavailable> onUnavailable;
+    std::optional<Ipv6Mode> ipv6;
     std::wstring commandLine;   // всё после " -- ", как есть
 };
 
@@ -94,6 +101,22 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
         }
         if ((arg == L"--adapter" || arg == L"--log" || arg == L"--config") && i + 1 < argc) {
             (arg == L"--adapter" ? o.adapter : arg == L"--log" ? o.log : o.config) = argv[++i];
+        } else if (arg == L"--on-unavailable" && i + 1 < argc) {
+            const std::wstring_view v = argv[++i];
+            if (v != L"block" && v != L"default") {
+                Line(L"Ошибка: --on-unavailable block|default");
+                return std::nullopt;
+            }
+            o.onUnavailable = v == L"default" ? OnUnavailable::Default : OnUnavailable::Block;
+        } else if (arg == L"--ipv6" && i + 1 < argc) {
+            const std::wstring_view v = argv[++i];
+            if (v == L"follow") o.ipv6 = Ipv6Mode::Follow;
+            else if (v == L"block") o.ipv6 = Ipv6Mode::Block;
+            else if (v == L"default") o.ipv6 = Ipv6Mode::Default;
+            else {
+                Line(L"Ошибка: --ipv6 follow|block|default");
+                return std::nullopt;
+            }
         } else if (arg == L"--no-wait") {
             o.wait = false;
         } else if (arg == L"--no-children") {
@@ -175,11 +198,33 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // Поведение без интерфейса: параметры командной строки важнее правила
+    UnavailablePolicy policy;
+    if (rule) {
+        policy.onUnavailable = rule->onUnavailable;
+        policy.ipv6 = rule->ipv6;
+    }
+    policy.onUnavailable = options->onUnavailable.value_or(policy.onUnavailable);
+    policy.ipv6 = options->ipv6.value_or(policy.ipv6);
+
+    // Интерфейс, заданный GUID, может быть сейчас отключён (VPN не подключён) — это не ошибка:
+    // hook-DLL применит политику и подхватит интерфейс, когда он появится.
     const auto adapters = EnumerateAdapters();
     const auto* adapter = FindAdapter(adapters, options->adapter);
-    if (!adapter) {
-        Line(std::format(L"Ошибка: интерфейс «{}» не найден{}", options->adapter,
-                         rule ? L" (отключён или удалён?)" : L""));
+    std::wstring adapterGuid;
+    std::wstring adapterLabel;
+    if (adapter) {
+        adapterGuid = GuidToString(adapter->guid);
+        adapterLabel = adapter->alias;
+    } else if (auto guid = NormalizeGuid(options->adapter)) {
+        adapterGuid = *guid;
+        adapterLabel = *guid;
+        Line(std::format(L"Внимание: интерфейс {} сейчас отсутствует — {}.", *guid,
+                         policy.UseDefaultRoute(false)
+                             ? L"пока его нет, трафик пойдёт маршрутом по умолчанию (default)"
+                             : L"пока его нет, соединения и DNS будут блокироваться (block)"));
+    } else {
+        Line(std::format(L"Ошибка: интерфейс «{}» не найден", options->adapter));
         return 1;
     }
 
@@ -198,15 +243,17 @@ int wmain(int argc, wchar_t** argv)
     Line(std::format(L"AppRoute: трафик «{}»{} идёт через интерфейс «{}».",
                      options->commandLine,
                      options->children ? L" и его дочерних процессов" : L"",
-                     adapter->alias));
+                     adapterLabel));
 
     // Правило — через окружение: его унаследуют и дочерние процессы (issue #8)
-    SetEnvironmentVariableW(kEnvAdapter, GuidToString(adapter->guid).c_str());
+    SetEnvironmentVariableW(kEnvAdapter, adapterGuid.c_str());
     SetEnvironmentVariableW(kEnvLog, options->log.empty() ? nullptr : options->log.c_str());
     SetEnvironmentVariableW(kEnvChildren, options->children ? nullptr : L"0");
     if (rule && rule->dns == DnsMode::System) {
         SetEnvironmentVariableW(kEnvDns, L"system");
     }
+    SetEnvironmentVariableW(kEnvOnUnavailable, OnUnavailableEnvValue(policy.onUnavailable));
+    SetEnvironmentVariableW(kEnvIpv6, Ipv6EnvValue(policy.ipv6));
 
     std::wstring commandLine = options->commandLine;
     STARTUPINFOW si{};

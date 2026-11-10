@@ -12,6 +12,7 @@
 
 #include "core/DnsResolver.h"
 #include "core/NetAdapters.h"
+#include "core/Policy.h"
 #include "core/Process.h"
 #include "core/Util.h"
 
@@ -29,6 +30,7 @@ namespace approute::hook {
 namespace {
 
 AdapterResolver* g_resolver = nullptr;
+UnavailablePolicy g_policy;
 std::vector<DohServer> g_doh;
 
 decltype(&::getaddrinfo) Real_getaddrinfo = &::getaddrinfo;
@@ -204,16 +206,31 @@ ADDRINFOEXW* BuildResultEx(const DnsAnswer& answer, USHORT port, int sockType, i
     return head;
 }
 
-// Общая часть: разрешить имя через интерфейс. false — резолвер не дал окончательного ответа,
-// нужно отдать запрос оригиналу.
-bool ResolveName(const std::wstring& name, int family, DnsAnswer& answer)
+enum class Resolution {
+    Answer,   // ответ в answer (адреса или NoSuchName)
+    System,   // отдать запрос системному резолверу
+    Block,    // вернуть ошибку: DNS мимо интерфейса запрещён
+};
+
+// Общая часть: разрешить имя через интерфейс. Если интерфейс недоступен или резолвер не дал
+// окончательного ответа — по политике правила: системный резолвер (default) или ошибка (block).
+Resolution ResolveName(const std::wstring& name, int family, DnsAnswer& answer)
 {
     DnsInterface iface;
-    if (!CurrentInterface(iface)) {
-        return false;
+    const bool available = CurrentInterface(iface);
+    if (available) {
+        answer = ResolveViaInterface(name, family, iface, g_doh);
+        if (answer.outcome != DnsOutcome::Failed) {
+            return Resolution::Answer;
+        }
     }
-    answer = ResolveViaInterface(name, family, iface, g_doh);
-    return answer.outcome != DnsOutcome::Failed;
+    const wchar_t* reason = available ? L"резолвер интерфейса не ответил" : L"интерфейс недоступен";
+    if (g_policy.UseSystemDns()) {
+        Log(L"DNS %ls: %ls — системный резолвер (default)", name.c_str(), reason);
+        return Resolution::System;
+    }
+    Log(L"DNS %ls: %ls — заблокировано", name.c_str(), reason);
+    return Resolution::Block;
 }
 
 std::wstring Widen(const char* s)
@@ -238,8 +255,10 @@ int WSAAPI Hook_GetAddrInfoW(PCWSTR node, PCWSTR service, const ADDRINFOW* hints
 
     const int family = hints && hints->ai_family != AF_UNSPEC ? hints->ai_family : AF_UNSPEC;
     DnsAnswer answer;
-    if (!ResolveName(node, family, answer)) {
-        return Real_GetAddrInfoW(node, service, hints, result);
+    switch (ResolveName(node, family, answer)) {
+    case Resolution::System: return Real_GetAddrInfoW(node, service, hints, result);
+    case Resolution::Block: *result = nullptr; return WSATRY_AGAIN;
+    case Resolution::Answer: break;
     }
     if (answer.outcome == DnsOutcome::NoSuchName) {
         *result = nullptr;
@@ -261,8 +280,10 @@ int WSAAPI Hook_getaddrinfo(const char* node, const char* service, const addrinf
     }
     const int family = FamilyFromHints(hints);
     DnsAnswer answer;
-    if (!ResolveName(Widen(node), family, answer)) {
-        return Real_getaddrinfo(node, service, hints, result);
+    switch (ResolveName(Widen(node), family, answer)) {
+    case Resolution::System: return Real_getaddrinfo(node, service, hints, result);
+    case Resolution::Block: *result = nullptr; return WSATRY_AGAIN;
+    case Resolution::Answer: break;
     }
     if (answer.outcome == DnsOutcome::NoSuchName) {
         *result = nullptr;
@@ -328,8 +349,10 @@ int WSAAPI Hook_GetAddrInfoExW(PCWSTR name, PCWSTR serviceName, DWORD nameSpace,
 
     const int family = hints && hints->ai_family != AF_UNSPEC ? hints->ai_family : AF_UNSPEC;
     DnsAnswer answer;
-    if (!ResolveName(name, family, answer)) {
-        return callReal();
+    switch (ResolveName(name, family, answer)) {
+    case Resolution::System: return callReal();
+    case Resolution::Block: *result = nullptr; return WSATRY_AGAIN;
+    case Resolution::Answer: break;
     }
     if (answer.outcome == DnsOutcome::NoSuchName) {
         *result = nullptr;
@@ -388,7 +411,7 @@ void HookApi(const char* name, T* detour, T** original)
 
 } // namespace
 
-void CreateDnsHooks(AdapterResolver& resolver)
+void CreateDnsHooks(AdapterResolver& resolver, const UnavailablePolicy& policy)
 {
     wchar_t mode[16] = {};
     if (GetEnvironmentVariableW(kEnvDns, mode, 16) != 0 && EqualsIgnoreCase(mode, L"system")) {
@@ -396,6 +419,7 @@ void CreateDnsHooks(AdapterResolver& resolver)
         return;
     }
     g_resolver = &resolver;
+    g_policy = policy;
     g_doh = DefaultDohServers();
 
     HookApi("getaddrinfo", &Hook_getaddrinfo, &Real_getaddrinfo);

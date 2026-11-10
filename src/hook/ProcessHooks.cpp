@@ -124,9 +124,13 @@ std::vector<wchar_t> RuleEnvironment(const void* environment, bool unicode)
     if (!g_config.logPath.empty()) {
         vars.emplace_back(kEnvLog, g_config.logPath);
     }
-    wchar_t dns[16] = {};
-    if (GetEnvironmentVariableW(kEnvDns, dns, 16) > 0) {
-        vars.emplace_back(kEnvDns, dns);
+    // Необязательные части правила — как у текущего процесса
+    for (const wchar_t* name : {kEnvDns, kEnvOnUnavailable, kEnvIpv6}) {
+        wchar_t value[16] = {};
+        const DWORD n = GetEnvironmentVariableW(name, value, 16);
+        if (n > 0 && n < 16) {
+            vars.emplace_back(name, value);
+        }
     }
     return MergeEnvironment(environment, unicode, vars);
 }
