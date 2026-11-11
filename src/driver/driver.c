@@ -38,7 +38,8 @@ static DRIVER_UNLOAD DriverUnload;
 static PDEVICE_OBJECT g_device = NULL;
 
 /* Диагностика: счётчики вызовов callout'ов. Только в памяти; при выгрузке драйвера пишутся в
-   значение Stats его раздела службы (REG_BINARY, LONG[4][STAT_COUNT]) — для проверки в тестовой ВМ */
+   значение Stats его раздела службы (REG_BINARY, LONG[4][STAT_COUNT]) — для проверки в тестовой ВМ и диагностики;
+   только числа, без адресов и имён программ (#51) */
 enum {
     STAT_CALLS,        /* вызовов classify */
     STAT_NO_RIGHTS,    /* нет права на запись: решение принято раньше */

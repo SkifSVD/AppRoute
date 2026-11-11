@@ -36,3 +36,22 @@ jobs:
           path: |
             build/bin/Release/*.exe
             build/bin/Release/*.dll
+
+      # Драйвер и пакет для подписи Microsoft (#51, docs/driver-signing.md) — если на runner'е есть WDK.
+      # Пакет не подписан: CAB подписывает EV-сертификатом владелец аккаунта Partner Center.
+      - name: Driver package
+        id: driver
+        run: |
+          $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $wdk = Get-ChildItem $inc -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path "$($_.FullName)\km\fwpsk.h" }
+          if (-not $wdk) { Write-Host 'WDK не найден — драйвер не собирается'; exit 0 }
+          ./tools/driver/Build-Driver.ps1 -NoSign -Package
+          "built=true" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: steps.driver.outputs.built == 'true'
+        with:
+          name: approute-wfp-package
+          path: build/driver/approute-wfp.cab
