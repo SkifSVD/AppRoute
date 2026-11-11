@@ -37,6 +37,22 @@ static DRIVER_UNLOAD DriverUnload;
 
 static PDEVICE_OBJECT g_device = NULL;
 
+/* Диагностика: счётчики вызовов callout'ов. Только в памяти; при выгрузке драйвера пишутся в
+   значение Stats его раздела службы (REG_BINARY, LONG[4][STAT_COUNT]) — для проверки в тестовой ВМ */
+enum {
+    STAT_CALLS,        /* вызовов classify */
+    STAT_NO_RIGHTS,    /* нет права на запись: решение принято раньше */
+    STAT_NO_TARGET,    /* нет контекста с целью */
+    STAT_SKIP_PROTO,   /* bind не UDP */
+    STAT_ACQUIRE_FAIL, /* не удалось получить данные для записи */
+    STAT_CHANGED,      /* адрес подменён */
+    STAT_UNCHANGED,    /* адрес оставлен (исключение, нет адреса семейства, уже наш) */
+    STAT_COUNT
+};
+static volatile LONG g_stats[4][STAT_COUNT];
+static UNICODE_STRING g_registryPath;
+static WCHAR g_registryBuffer[260];
+
 typedef struct CALLOUT_REG {
     const GUID* key;
     BOOLEAN bind;     /* TRUE — bind redirect, FALSE — connect redirect */
@@ -144,6 +160,18 @@ static void PermitAndKeepWriting(FWPS_CLASSIFY_OUT0* classifyOut, const FWPS_FIL
     }
 }
 
+static ULONG CalloutIndex(UINT16 layer)
+{
+    switch (layer) {
+    case FWPS_LAYER_ALE_BIND_REDIRECT_V4: return 0;
+    case FWPS_LAYER_ALE_BIND_REDIRECT_V6: return 1;
+    case FWPS_LAYER_ALE_CONNECT_REDIRECT_V4: return 2;
+    default: return 3;
+    }
+}
+
+#define STAT(name) InterlockedIncrement(&g_stats[calloutIndex][name])
+
 static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
                            void* layerData, const void* classifyContext, const FWPS_FILTER3* filter,
                            UINT64 flowContext, FWPS_CLASSIFY_OUT0* classifyOut)
@@ -152,11 +180,15 @@ static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWP
     UNREFERENCED_PARAMETER(layerData);
     UNREFERENCED_PARAMETER(flowContext);
 
+    const ULONG calloutIndex = CalloutIndex(inFixedValues->layerId);
+    STAT(STAT_CALLS);
     if (!(classifyOut->rights & FWPS_RIGHT_ACTION_WRITE)) {
+        STAT(STAT_NO_RIGHTS);
         return;   /* решение уже принято фильтром с большим весом */
     }
     const APPROUTE_TARGET* target = TargetOf(filter);
     if (target == NULL || classifyContext == NULL) {
+        STAT(STAT_NO_TARGET);
         PermitAndKeepWriting(classifyOut, filter);
         return;
     }
@@ -170,6 +202,7 @@ static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWP
         const UINT32 protoField = layer == FWPS_LAYER_ALE_BIND_REDIRECT_V4 ? FWPS_FIELD_ALE_BIND_REDIRECT_V4_IP_PROTOCOL
                                                                           : FWPS_FIELD_ALE_BIND_REDIRECT_V6_IP_PROTOCOL;
         if (inFixedValues->incomingValue[protoField].value.uint8 != IPPROTO_UDP) {
+            STAT(STAT_SKIP_PROTO);
             PermitAndKeepWriting(classifyOut, filter);
             return;
         }
@@ -177,6 +210,7 @@ static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWP
 
     UINT64 handle = 0;
     if (!NT_SUCCESS(FwpsAcquireClassifyHandle0((void*)classifyContext, 0, &handle))) {
+        STAT(STAT_ACQUIRE_FAIL);
         PermitAndKeepWriting(classifyOut, filter);
         return;
     }
@@ -193,7 +227,9 @@ static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWP
         }
         /* Изменения применяются всегда — иначе выданный указатель не освободится */
         FwpsApplyModifiedLayerData0(handle, writable, 0);
-        UNREFERENCED_PARAMETER(changed);
+        STAT(changed ? STAT_CHANGED : STAT_UNCHANGED);
+    } else {
+        STAT(STAT_ACQUIRE_FAIL);
     }
     FwpsReleaseClassifyHandle0(handle);
     PermitAndKeepWriting(classifyOut, filter);
@@ -217,10 +253,28 @@ static void UnregisterCallouts(void)
     }
 }
 
+static void SaveStats(void)
+{
+    if (g_registryPath.Length == 0) {
+        return;
+    }
+    OBJECT_ATTRIBUTES attributes;
+    InitializeObjectAttributes(&attributes, &g_registryPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE key = NULL;
+    if (NT_SUCCESS(ZwOpenKey(&key, KEY_SET_VALUE, &attributes))) {
+        UNICODE_STRING name = RTL_CONSTANT_STRING(L"Stats");
+        LONG copy[4][STAT_COUNT];
+        RtlCopyMemory(copy, (const void*)g_stats, sizeof(copy));
+        ZwSetValueKey(key, &name, 0, REG_BINARY, copy, sizeof(copy));
+        ZwClose(key);
+    }
+}
+
 static void DriverUnload(PDRIVER_OBJECT driverObject)
 {
     UNREFERENCED_PARAMETER(driverObject);
     UnregisterCallouts();
+    SaveStats();
     if (g_device != NULL) {
         IoDeleteDevice(g_device);
         g_device = NULL;
@@ -229,8 +283,12 @@ static void DriverUnload(PDRIVER_OBJECT driverObject)
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath)
 {
-    UNREFERENCED_PARAMETER(registryPath);
     driverObject->DriverUnload = DriverUnload;
+    g_registryPath.Buffer = g_registryBuffer;
+    g_registryPath.MaximumLength = sizeof(g_registryBuffer);
+    if (registryPath != NULL) {
+        RtlCopyUnicodeString(&g_registryPath, registryPath);
+    }
 
     /* Безымянное устройство: открыть его из пользовательского режима нельзя */
     NTSTATUS status = IoCreateDevice(driverObject, 0, NULL, FILE_DEVICE_NETWORK, FILE_DEVICE_SECURE_OPEN, FALSE, &g_device);

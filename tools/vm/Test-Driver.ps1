@@ -92,11 +92,26 @@ Check 'после снятия правил curl снова с основной 
 $left = @(OurFilters).Count
 Check 'фильтров AppRoute не осталось' ($left -eq 0) "найдено: $left"
 
+# Счётчики драйвера: он пишет их в раздел своей службы при выгрузке
+sc.exe stop approute-wfp | Out-Null
+Start-Sleep 2
+$stats = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\approute-wfp' -Name Stats -ErrorAction SilentlyContinue).Stats
+$statNames = 'вызовов', 'нет права записи', 'нет цели', 'не UDP', 'ошибка доступа', 'подменён', 'не подменён'
+$statsText = if ($stats) {
+    $n = 0
+    foreach ($callout in 'bind v4', 'bind v6', 'connect v4', 'connect v6') {
+        $parts = foreach ($name in $statNames) { '{0}={1}' -f $name, [BitConverter]::ToInt32($stats, $n * 4); $n++ }
+        '  {0}: {1}' -f $callout, ($parts -join ', ')
+    }
+} else { '  (счётчиков нет)' }
+
 & $routes uninstall-driver
 Check 'драйвер выгружен' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
 
 Write-Host ''
 Write-Host '=== Итог (скопируйте в чат) ==='
 $results
+'--- счётчики драйвера ---'
+$statsText
 '--- вывод approute-routes wfp ---'
 Get-Content $wfpLog, $wfpErr -Encoding UTF8 -ErrorAction SilentlyContinue
