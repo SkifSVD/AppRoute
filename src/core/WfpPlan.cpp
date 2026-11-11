@@ -119,6 +119,34 @@ bool SameWfpTarget(const APPROUTE_TARGET& a, const APPROUTE_TARGET& b)
            std::memcmp(a.v6, b.v6, 16) == 0 && a.v6ScopeId == b.v6ScopeId;
 }
 
+bool SameWfpPlan(const WfpPlan& a, const WfpPlan& b)
+{
+    if (!EqualsIgnoreCase(a.userSid, b.userSid) || a.filters.size() != b.filters.size() ||
+        a.exemptions.size() != b.exemptions.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.filters.size(); ++i) {
+        if (!EqualsIgnoreCase(a.filters[i].appPath, b.filters[i].appPath) ||
+            !SameWfpTarget(a.filters[i].target, b.filters[i].target)) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < a.exemptions.size(); ++i) {
+        const WfpExemption& x = a.exemptions[i];
+        const WfpExemption& y = b.exemptions[i];
+        if (x.length != y.length || x.prefix.si_family != y.prefix.si_family) {
+            return false;
+        }
+        const bool same = x.prefix.si_family == AF_INET
+                              ? x.prefix.Ipv4.sin_addr.s_addr == y.prefix.Ipv4.sin_addr.s_addr
+                              : std::memcmp(&x.prefix.Ipv6.sin6_addr, &y.prefix.Ipv6.sin6_addr, 16) == 0;
+        if (!same) {
+            return false;
+        }
+    }
+    return true;
+}
+
 WfpPlan WfpPlanFromConfig(const Config& config, const std::vector<NetAdapter>& adapters, const std::wstring& userSid)
 {
     WfpPlan plan;

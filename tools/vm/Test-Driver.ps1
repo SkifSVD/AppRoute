@@ -8,9 +8,15 @@
        TCP (curl) и UDP (сокет на «любом» адресе) должны выйти с адреса второй карты.
     4. Снимает правила (завершает approute-routes wfp) и проверяет, что всё вернулось.
     5. Выгружает драйвер.
+
+    -Service: вместо шагов 1, 3–5 — служба AppRoute с драйвером (install-service --with-driver):
+    правила без отдельного процесса, правка конфига на лету, остановка службы снимает правила,
+    удаление службы удаляет и драйвер.
     Итог печатается; его можно целиком скопировать в чат.
 #>
+param([switch]$Service)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8   # вывод approute-routes — UTF-8
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $routes = Join-Path $dir 'approute-routes.exe'
 $results = New-Object System.Collections.Generic.List[string]
@@ -61,36 +67,65 @@ function OurFilters {
 $before = TcpLocalIp
 Check 'без правил curl выходит с основной карты' ($before -eq $main.IPAddress) "локальный адрес: $before"
 
-# --- драйвер
-& $routes install-driver --sys (Join-Path $dir 'approute-wfp.sys')
-Check 'драйвер загружен' ((Get-Service approute-wfp -ErrorAction SilentlyContinue).Status -eq 'Running')
-
-# --- правила
 $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 $wfpLog = Join-Path $dir 'wfp-output.txt'
 $wfpErr = Join-Path $dir 'wfp-errors.txt'
-$wfp = Start-Process $routes -ArgumentList 'wfp', '--config', "`"$config`"", '--client-sid', $sid -PassThru -WindowStyle Hidden `
-    -RedirectStandardOutput $wfpLog -RedirectStandardError $wfpErr
-Start-Sleep 3
-Check 'approute-routes wfp работает' (-not $wfp.HasExited) $(if ($wfp.HasExited) { "завершился с кодом $($wfp.ExitCode)" })
-$active = OurFilters
-Check 'фильтры AppRoute добавлены' ($active.Count -gt 0) ($active -join '; ')
-$tcp = TcpLocalIp
-Check 'TCP (curl) — с адреса второй карты' ($tcp -eq $second.IPAddress) "локальный адрес: $tcp"
-$udp = UdpSource
-Check 'UDP (подключённый сокет) — с адреса второй карты' ($udp -eq $second.IPAddress) "локальный адрес: $udp"
-$udpBound = UdpLocalIp
-Check 'UDP (привязка к «любому» адресу) — адрес второй карты' ($udpBound -eq $second.IPAddress) "локальный адрес: $udpBound"
-$other = (Invoke-WebRequest http://example.com/ -UseBasicParsing -TimeoutSec 15).StatusCode
-Check 'другие программы работают как обычно' ($other -eq 200) "PowerShell: $other"
+$serviceLog = Join-Path $env:ProgramData 'AppRoute\routes.log'
+Remove-Item $wfpLog, $wfpErr -ErrorAction SilentlyContinue
 
-# --- снятие правил
-Stop-Process -Id $wfp.Id -Force
-Start-Sleep 2
-$after = TcpLocalIp
-Check 'после снятия правил curl снова с основной карты' ($after -eq $main.IPAddress) "локальный адрес: $after"
-$left = @(OurFilters).Count
-Check 'фильтров AppRoute не осталось' ($left -eq 0) "найдено: $left"
+function CheckRedirected([string]$how) {
+    $active = OurFilters
+    Check "фильтры AppRoute добавлены ($how)" ($active.Count -gt 0) ($active -join '; ')
+    $tcp = TcpLocalIp
+    Check 'TCP (curl) — с адреса второй карты' ($tcp -eq $second.IPAddress) "локальный адрес: $tcp"
+    $udp = UdpSource
+    Check 'UDP (подключённый сокет) — с адреса второй карты' ($udp -eq $second.IPAddress) "локальный адрес: $udp"
+    $udpBound = UdpLocalIp
+    Check 'UDP (привязка к «любому» адресу) — адрес второй карты' ($udpBound -eq $second.IPAddress) "локальный адрес: $udpBound"
+    $other = (Invoke-WebRequest http://example.com/ -UseBasicParsing -TimeoutSec 15).StatusCode
+    Check 'другие программы работают как обычно' ($other -eq 200) "PowerShell: $other"
+}
+
+if ($Service) {
+    # --- служба AppRoute с драйвером: правила без отдельного процесса
+    & $routes install-service --config $config --client-sid $sid --with-driver 2>&1 | Out-File $wfpLog -Encoding UTF8
+    Check 'служба AppRoute запущена' ((Get-Service AppRoute -ErrorAction SilentlyContinue).Status -eq 'Running')
+    Check 'драйвер загружен вместе со службой' ((Get-Service approute-wfp -ErrorAction SilentlyContinue).Status -eq 'Running')
+    Start-Sleep 3
+    CheckRedirected 'службой'
+
+    # Правка конфига действует на лету: убираем правило curl
+    @{ version = 1; primary = 'auto'; rules = @((& $rule $udpExe)) } | ConvertTo-Json -Depth 5 | Set-Content $config -Encoding UTF8
+    Start-Sleep 4
+    $edited = TcpLocalIp
+    Check 'правило curl убрано из конфига — curl с основной карты' ($edited -eq $main.IPAddress) "локальный адрес: $edited"
+    $udpStill = UdpSource
+    Check 'правило UDP-программы осталось в силе' ($udpStill -eq $second.IPAddress) "локальный адрес: $udpStill"
+
+    # Остановка службы снимает правила
+    Stop-Service AppRoute
+    Start-Sleep 2
+    $left = @(OurFilters).Count
+    Check 'служба остановлена — фильтров AppRoute не осталось' ($left -eq 0) "найдено: $left"
+    $after = UdpSource
+    Check 'после остановки службы UDP-программа с основной карты' ($after -eq $main.IPAddress) "локальный адрес: $after"
+} else {
+    # --- драйвер и approute-routes wfp
+    & $routes install-driver --sys (Join-Path $dir 'approute-wfp.sys')
+    Check 'драйвер загружен' ((Get-Service approute-wfp -ErrorAction SilentlyContinue).Status -eq 'Running')
+    $wfp = Start-Process $routes -ArgumentList 'wfp', '--config', "`"$config`"", '--client-sid', $sid -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $wfpLog -RedirectStandardError $wfpErr
+    Start-Sleep 3
+    Check 'approute-routes wfp работает' (-not $wfp.HasExited) $(if ($wfp.HasExited) { "завершился с кодом $($wfp.ExitCode)" })
+    CheckRedirected 'approute-routes wfp'
+
+    Stop-Process -Id $wfp.Id -Force
+    Start-Sleep 2
+    $after = TcpLocalIp
+    Check 'после снятия правил curl снова с основной карты' ($after -eq $main.IPAddress) "локальный адрес: $after"
+    $left = @(OurFilters).Count
+    Check 'фильтров AppRoute не осталось' ($left -eq 0) "найдено: $left"
+}
 
 # Счётчики драйвера: он пишет их в раздел своей службы при выгрузке
 sc.exe stop approute-wfp | Out-Null
@@ -106,13 +141,26 @@ $statsText = if ($stats) {
     }
 } else { '  (счётчиков нет)' }
 
-& $routes uninstall-driver
-Check 'драйвер выгружен' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
+if ($Service) {
+    $serviceTail = Get-Content $serviceLog -Tail 25 -Encoding UTF8 -ErrorAction SilentlyContinue
+    & $routes uninstall-service 2>&1 | Out-File $wfpLog -Encoding UTF8 -Append
+    Check 'служба AppRoute удалена' (-not (Get-Service AppRoute -ErrorAction SilentlyContinue))
+    Check 'драйвер удалён вместе со службой' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
+    $installed = Join-Path $env:ProgramFiles 'AppRoute\approute-wfp.sys'
+    Check 'файл драйвера удалён' (-not (Test-Path $installed))
+} else {
+    & $routes uninstall-driver
+    Check 'драйвер выгружен' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
+}
 
 Write-Host ''
 Write-Host '=== Итог (скопируйте в чат) ==='
 $results
 '--- счётчики драйвера ---'
 $statsText
-'--- вывод approute-routes wfp ---'
+'--- вывод approute-routes ---'
 Get-Content $wfpLog, $wfpErr -Encoding UTF8 -ErrorAction SilentlyContinue
+if ($Service) {
+    '--- журнал службы (конец) ---'
+    $serviceTail
+}
