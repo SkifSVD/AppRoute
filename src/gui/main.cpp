@@ -1193,7 +1193,7 @@ void UpdateAdapterStep(HWND page, Wizard& w)
     if (target == kOtherProxy) {
         info = L"Нажмите «Далее», чтобы указать адрес прокси.";
     } else if (!w.rule.proxy.empty()) {
-        info = ProxyState(w.rule.proxy) + L" · UDP программы через прокси не передаётся и блокируется";
+        info = ProxyState(w.rule.proxy) + L" · TCP и UDP программы идут через прокси";
     } else if (!w.rule.adapter.empty()) {
         if (const NetAdapter* a = AdapterByGuid(w.rule.adapter)) {
             const std::wstring v4 = FirstAddress(*a, AF_INET);
