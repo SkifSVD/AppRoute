@@ -79,10 +79,15 @@ if ($Package) {
     New-Item -ItemType Directory -Force -Path $pkg | Out-Null
     Copy-Item $sys, "$out\approute-wfp.pdb" $pkg
 
-    # DriverVer: дата сборки и версия проекта из CMakeLists.txt (x.y.z → x.y.z.0)
-    $cmake = Get-Content (Join-Path $root 'CMakeLists.txt') -Raw
-    if ($cmake -notmatch 'project\(AppRoute\s+VERSION\s+(\d+\.\d+\.\d+)') { throw 'Не найдена версия в CMakeLists.txt' }
-    $driverVer = "DriverVer   = $((Get-Date).ToString('MM/dd/yyyy', [cultureinfo]::InvariantCulture)),$($Matches[1]).0"
+    # DriverVer: дата сборки и версия AppRoute по тегам выпусков (#63, cmake/GitVersion.cmake): x.y.z → x.y.z.0
+    $lists = Get-Content (Join-Path $root 'CMakeLists.txt') -Raw
+    if ($lists -notmatch 'project\(AppRoute\s+VERSION\s+(\d+\.\d+\.\d+)') { throw 'Не найдена версия в CMakeLists.txt' }
+    $cmake = (Get-Command cmake -ErrorAction SilentlyContinue)?.Source
+    if (-not $cmake) { $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' }
+    $version = (& $cmake "-DSOURCE_DIR=$root" "-DBASE_VERSION=$($Matches[1])" -P (Join-Path $root 'cmake\GitVersion.cmake') |
+        Select-Object -Last 1).Trim()
+    if ($LASTEXITCODE -or $version -notmatch '^\d+\.\d+\.\d+$') { throw 'Не удалось вычислить версию' }
+    $driverVer = "DriverVer   = $((Get-Date).ToString('MM/dd/yyyy', [cultureinfo]::InvariantCulture)),$version.0"
     $inf = Get-Content (Join-Path $root 'src\driver\approute-wfp.inf') -Raw
     if ($inf -notmatch '(?m)^DriverVer\s*=.*$') { throw 'В approute-wfp.inf нет строки DriverVer' }
     $inf = $inf -replace '(?m)^DriverVer\s*=.*$', $driverVer

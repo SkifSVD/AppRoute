@@ -21,6 +21,7 @@
 // watch применяет политику, следит за изменениями (переподключение VPN) и откатывает всё
 // при выходе (Ctrl+C / закрытие окна). Изменения не переживают перезагрузку.
 
+#include "core/Version.h"
 #include "core/Config.h"
 #include "core/ConfigPolicy.h"
 #include "core/Json.h"
@@ -820,6 +821,7 @@ void WINAPI ServiceMain(DWORD, wchar_t**)
     if (!dir.empty()) {
         g_logFile = OpenProtectedLog(dir, L"routes.log");
     }
+    Line(std::format(L"[{}] AppRoute {}", Now(), AppRouteBuild()));
     g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ReportService(SERVICE_RUNNING);
     int code = 1;
@@ -999,6 +1001,10 @@ int CmdUninstallService()
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--version") {
+        Line(std::wstring(L"approute-routes ") + AppRouteBuild());
+        return 0;
+    }
     const auto options = ParseArgs(argc, argv);
     if (!options) {
         PrintUsage();

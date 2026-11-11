@@ -1,6 +1,7 @@
 # Сборка
 /build/
 /out/
+/deploy/
 CMakeUserPresets.json
 
 # Visual Studio / VS Code

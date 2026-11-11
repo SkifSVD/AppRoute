@@ -8,6 +8,7 @@
 //   approute-config packages
 //   approute-config proxy-auth ADDR USER | ADDR --remove
 
+#include "core/Version.h"
 #include "core/Autostart.h"
 #include "core/Config.h"
 #include "core/NetAdapters.h"
@@ -398,6 +399,10 @@ int Remove(Config& config, const std::wstring& path, const std::vector<std::wstr
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--version") {
+        Line(std::wstring(L"approute-config ") + AppRouteBuild());
+        return 0;
+    }
     std::vector<std::wstring> args(argv + 1, argv + argc);
     std::wstring path = DefaultConfigPath();
     if (args.size() >= 2 && args[0] == L"--config") {
