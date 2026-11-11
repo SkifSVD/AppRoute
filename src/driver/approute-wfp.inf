@@ -1,0 +1,49 @@
+;
+; approute-wfp.inf - AppRoute WFP driver package (#51) for Microsoft attestation signing
+; (Partner Center). ASCII only: INF files are read as ANSI/UTF-16.
+;
+; Regular installs do not use this INF: the AppRoute service registers the driver itself
+; (approute-routes install-service --with-driver). Partner Center needs the INF to validate
+; and sign the package. DriverVer is stamped by tools/driver/Build-Driver.ps1 -Package.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = WFPCALLOUTS
+ClassGuid   = {57465043-616C-6C6F-7574-5F636C617373}
+Provider    = %ProviderName%
+CatalogFile = approute-wfp.cat
+DriverVer   = 01/01/2026,0.0.0.0
+PnpLockdown = 1
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+approute-wfp.sys = 1,,
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[DefaultInstall.NTamd64]
+CopyFiles = AppRouteWfp.Files
+
+[DefaultInstall.NTamd64.Services]
+AddService = approute-wfp,,AppRouteWfp.Service
+
+[AppRouteWfp.Files]
+approute-wfp.sys
+
+[AppRouteWfp.Service]
+DisplayName   = %ServiceName%
+Description   = %ServiceDesc%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\approute-wfp.sys
+
+[Strings]
+ProviderName = "AppRoute"
+DiskName     = "AppRoute WFP Driver"
+ServiceName  = "AppRoute WFP driver"
+ServiceDesc  = "Binds sockets of selected applications to the chosen network interface (AppRoute)."

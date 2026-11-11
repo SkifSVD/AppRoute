@@ -36,7 +36,8 @@
    с ICE-кандидатами. Ставится вместе со службой по отдельному флажку в окне согласия. Пока
    подписан только тестовой подписью и загружается лишь в тестовом режиме Windows (проверка — в
    виртуальной машине, см. «Драйвер: сборка и проверка»); для обычных систем нужна подпись
-   Microsoft (attestation signing) — до неё правила действуют через hook-DLL.
+   Microsoft (attestation signing) — до неё правила действуют через hook-DLL. Что для подписи
+   готово и что нужно владельцу сертификата — [docs/driver-signing.md](docs/driver-signing.md).
 
 ## Сборка
 
@@ -57,6 +58,7 @@ git clone --recurse-submodules https://github.com/SkifSVD/AppRoute.git
 
 ```powershell
 ./tools/driver/Build-Driver.ps1      # build\driver\approute-wfp.sys с тестовой подписью
+./tools/driver/Build-Driver.ps1 -Package   # и пакет для подписи Microsoft: build\driver\approute-wfp.cab
 ```
 
 Драйвер с тестовой подписью Windows загружает только в тестовом режиме (`bcdedit /set
