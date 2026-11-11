@@ -50,6 +50,7 @@ struct Association {
 
 UdpRelayApi g_api;
 SOCKADDR_INET g_proxy{};
+const ProxyCredential* g_credential = nullptr;
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::vector<std::unique_ptr<Association>> g_assocs;
 std::atomic<bool> g_active{false};
@@ -156,13 +157,14 @@ bool Associate(Association& a, const wchar_t*& error)
     setsockopt(a.control, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 
     char reply[kMaxHeader] = {};
-    if (!SendAll(a.control, Socks5Greeting()) || !RecvExact(a.control, reply, 2)) {
-        error = L"нет ответа на приветствие SOCKS5";
-        return false;
-    }
-    if (!Socks5NoAuthAccepted(std::string_view(reply, 2))) {
-        WSASetLastError(WSAECONNREFUSED);
-        error = L"прокси требует аутентификацию (поддерживается только без неё)";
+    const Socks5Auth auth = Socks5Negotiate([&](std::string_view data) { return SendAll(a.control, data); },
+                                            [&](char* out, size_t size) { return RecvExact(a.control, out, size); },
+                                            g_credential);
+    if (auth != Socks5Auth::Ok) {
+        if (auth != Socks5Auth::NoAnswer) {
+            WSASetLastError(WSAECONNREFUSED);
+        }
+        error = Socks5AuthText(auth);
         return false;
     }
     if (!SendAll(a.control, Socks5UdpAssociateRequest()) || !RecvExact(a.control, reply, 5)) {
@@ -439,9 +441,10 @@ std::string KeyOf(const SOCKADDR_INET& target, const std::optional<std::string>&
 
 } // namespace
 
-void UdpRelayInit(const SOCKADDR_INET& proxy, const UdpRelayApi& api)
+void UdpRelayInit(const SOCKADDR_INET& proxy, const ProxyCredential* credential, const UdpRelayApi& api)
 {
     g_proxy = proxy;
+    g_credential = credential;
     g_api = api;
 }
 

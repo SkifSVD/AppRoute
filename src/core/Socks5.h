@@ -2,7 +2,7 @@
 
 // Цель правила «прокси» (#17): соединения программы идут через SOCKS5-прокси, например
 // локальный прокси Xray/V2Ray-клиента, работающего без TUN. Здесь — разбор адреса прокси,
-// сообщения протокола (RFC 1928, без аутентификации) и пул служебных адресов для имён.
+// сообщения протокола (RFC 1928; логин и пароль — RFC 1929, #56) и пул служебных адресов для имён.
 //
 // Имена разрешает прокси: программа получает служебный адрес из 198.18.0.0/15 (диапазон для
 // тестирования сетей, в интернете не встречается), а при соединении с ним hook-DLL передаёт
@@ -11,6 +11,7 @@
 #include "core/Win.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +19,8 @@
 #include <vector>
 
 namespace approute {
+
+struct ProxyCredential;
 
 // "127.0.0.1:10808" или "[::1]:1080" — только IP-адрес (имя прокси пришлось бы разрешать) и
 // порт 1–65535. Порт в результате — в сетевом порядке.
@@ -31,8 +34,28 @@ bool ProxyResponds(const SOCKADDR_INET& address, DWORD timeoutMs);
 
 // --- протокол -------------------------------------------------------------------------------
 
-// Приветствие: версия 5, один метод — «без аутентификации».
-std::string Socks5Greeting();
+// Приветствие: версия 5, метод «без аутентификации», с offerPassword — и «логин и пароль».
+std::string Socks5Greeting(bool offerPassword = false);
+
+// Запрос RFC 1929: VER(1) ULEN USER PLEN PASS в UTF-8; nullopt — длина вне 1–255 байт.
+std::optional<std::string> Socks5PasswordRequest(const ProxyCredential& credential);
+
+// Согласование метода (и вход по паролю, если прокси его выбрал)
+enum class Socks5Auth {
+    Ok,
+    NoAnswer,        // нет ответа / соединение закрыто
+    NeedsPassword,   // прокси требует логин и пароль, а их нет
+    WrongPassword,   // прокси отклонил логин и пароль
+    Unsupported,     // прокси не принял ни один метод или это не SOCKS5
+};
+using Socks5Send = std::function<bool(std::string_view)>;
+using Socks5Recv = std::function<bool(char*, size_t)>;
+Socks5Auth Socks5Negotiate(const Socks5Send& send, const Socks5Recv& recv, const ProxyCredential* credential);
+const wchar_t* Socks5AuthText(Socks5Auth result);
+
+// Проверка прокси: соединение и согласование (с паролем, если он задан), не дольше timeoutMs
+// на каждый шаг.
+Socks5Auth CheckProxy(const SOCKADDR_INET& address, const ProxyCredential* credential, DWORD timeoutMs);
 
 // Ответ на приветствие (2 байта): выбран метод «без аутентификации».
 bool Socks5NoAuthAccepted(std::string_view reply);

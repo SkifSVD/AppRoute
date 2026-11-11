@@ -1,6 +1,7 @@
 // Тесты цели правила «прокси» (issue #17): адрес прокси, сообщения SOCKS5, служебные адреса.
 
 #include "core/Config.h"
+#include "core/ProxyCredentials.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
 
@@ -80,6 +81,91 @@ TEST(Socks5UdpMessages)
     CHECK(Socks5UdpHeaderLength(*byName) == 18u);
     CHECK(!Socks5UdpHeaderLength(std::string("\x00\x00\x01\x01\x08\x08\x08\x08\x00\x35", 10)));   // фрагмент
     CHECK(!Socks5UdpHeaderLength(std::string("\x00\x00\x00\x01\x08\x08", 6)));
+}
+
+namespace {
+
+// Прокси-собеседник для Socks5Negotiate: отдаёт заготовленные ответы, запоминает отправленное
+struct FakeProxy {
+    std::string replies;
+    std::string sent;
+    Socks5Send Send()
+    {
+        return [this](std::string_view d) {
+            sent.append(d);
+            return true;
+        };
+    }
+    Socks5Recv Recv()
+    {
+        return [this](char* out, size_t n) {
+            if (replies.size() < n) {
+                return false;
+            }
+            std::memcpy(out, replies.data(), n);
+            replies.erase(0, n);
+            return true;
+        };
+    }
+};
+
+} // namespace
+
+TEST(Socks5PasswordAuth)
+{
+    CHECK(Socks5Greeting(true) == std::string("\x05\x02\x00\x02", 4));
+
+    ProxyCredential cred;
+    cred.user = L"user";
+    cred.password = L"пароль";
+    const auto request = Socks5PasswordRequest(cred);
+    CHECK(request && *request == std::string("\x01\x04user\x0C", 7) + "пароль");   // UTF-8: 12 байт
+    ProxyCredential tooLong;
+    tooLong.user = std::wstring(256, L'a');
+    tooLong.password = L"p";
+    CHECK(!Socks5PasswordRequest(tooLong));
+    CHECK(ValidateProxyCredential(tooLong).has_value());
+    CHECK(!ValidateProxyCredential(cred));
+
+    FakeProxy noAuth{std::string("\x05\x00", 2)};
+    CHECK(Socks5Negotiate(noAuth.Send(), noAuth.Recv(), nullptr) == Socks5Auth::Ok);
+    CHECK(noAuth.sent == std::string("\x05\x01\x00", 3));
+
+    FakeProxy ok{std::string("\x05\x02\x01\x00", 4)};
+    CHECK(Socks5Negotiate(ok.Send(), ok.Recv(), &cred) == Socks5Auth::Ok);
+    CHECK(ok.sent == std::string("\x05\x02\x00\x02", 4) + *request);
+
+    FakeProxy wrong{std::string("\x05\x02\x01\x01", 4)};
+    CHECK(Socks5Negotiate(wrong.Send(), wrong.Recv(), &cred) == Socks5Auth::WrongPassword);
+
+    FakeProxy needs{std::string("\x05\xFF", 2)};
+    CHECK(Socks5Negotiate(needs.Send(), needs.Recv(), nullptr) == Socks5Auth::NeedsPassword);
+    FakeProxy refused{std::string("\x05\xFF", 2)};
+    CHECK(Socks5Negotiate(refused.Send(), refused.Recv(), &cred) == Socks5Auth::Unsupported);
+    FakeProxy silent{""};
+    CHECK(Socks5Negotiate(silent.Send(), silent.Recv(), nullptr) == Socks5Auth::NoAnswer);
+}
+
+TEST(ProxyCredentialStore)
+{
+    // Адрес из TEST-NET-1 (RFC 5737) — запись только на время теста
+    const auto proxy = ParseProxyAddress(L"192.0.2.1:9");
+    CHECK(proxy.has_value());
+    if (!proxy) {
+        return;
+    }
+    DeleteProxyCredential(*proxy);
+    CHECK(!ReadProxyCredential(*proxy));
+    ProxyCredential cred;
+    cred.user = L"тест";
+    cred.password = L"секрет";
+    std::wstring error;
+    CHECK(SaveProxyCredential(*proxy, cred, &error));
+    const auto read = ReadProxyCredential(*proxy);
+    CHECK(read && read->user == L"тест" && read->password == L"секрет");
+    CHECK(ProxyCredentialTarget(*proxy) == L"AppRoute/SOCKS5/192.0.2.1:9");
+    CHECK(DeleteProxyCredential(*proxy));
+    CHECK(!ReadProxyCredential(*proxy));
 }
 
 TEST(FakeIpPoolMapsNames)

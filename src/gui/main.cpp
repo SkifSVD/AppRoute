@@ -18,6 +18,7 @@
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
 #include "core/PackagedApps.h"
+#include "core/ProxyCredentials.h"
 #include "core/PrimarySwitch.h"
 #include "core/RouteManager.h"
 #include "core/ServiceSetup.h"
@@ -223,15 +224,79 @@ std::wstring ProxyState(const std::wstring& proxy)
     const bool loopback = address->si_family == AF_INET
                               ? (ntohl(address->Ipv4.sin_addr.s_addr) >> 24) == 127
                               : IN6_IS_ADDR_LOOPBACK(&address->Ipv6.sin6_addr);
+    const auto credential = ReadProxyCredential(*address);
     if (!loopback) {
-        return L"Удалённый прокси";
+        return credential ? L"Удалённый прокси, вход по паролю" : L"Удалённый прокси";
     }
-    return ProxyResponds(*address, 200) ? L"Прокси отвечает" : L"Прокси не отвечает";
+    switch (CheckProxy(*address, credential ? &*credential : nullptr, 200)) {
+    case Socks5Auth::Ok: return credential ? L"Прокси отвечает, вход по паролю" : L"Прокси отвечает";
+    case Socks5Auth::NoAnswer: return L"Прокси не отвечает";
+    case Socks5Auth::NeedsPassword: return L"Прокси требует логин и пароль";
+    case Socks5Auth::WrongPassword: return L"Прокси отклонил логин и пароль";
+    case Socks5Auth::Unsupported: return L"Не SOCKS5-прокси";
+    }
+    return L"";
 }
 
 struct ProxyDialog {
     std::wstring address;
+    std::wstring loadedFor;   // адрес, для которого показан сохранённый логин
 };
+
+// Логин сохранённых учётных данных прокси; пароль не показывается — поле пустое с подсказкой
+void ShowProxyCredential(HWND dlg, ProxyDialog& d, const std::wstring& text)
+{
+    const auto address = ParseProxyAddress(text);
+    const std::wstring key = address ? FormatProxyAddress(*address) : L"";
+    if (key == d.loadedFor) {
+        return;
+    }
+    d.loadedFor = key;
+    const auto credential = address ? ReadProxyCredential(*address) : std::nullopt;
+    SetDlgItemTextW(dlg, IDC_PROXY_USER, credential ? credential->user.c_str() : L"");
+    SetDlgItemTextW(dlg, IDC_PROXY_PASSWORD, L"");
+    SendDlgItemMessageW(dlg, IDC_PROXY_PASSWORD, EM_SETCUEBANNER, TRUE,
+                        reinterpret_cast<LPARAM>(credential ? L"задан — оставьте пустым, чтобы не менять" : L""));
+}
+
+// Сохранить / удалить логин и пароль по полям диалога; false — остаться в диалоге
+bool ApplyProxyCredential(HWND dlg, const SOCKADDR_INET& address)
+{
+    ProxyCredential credential;
+    credential.user = WindowText(GetDlgItem(dlg, IDC_PROXY_USER));
+    {
+        HWND edit = GetDlgItem(dlg, IDC_PROXY_PASSWORD);
+        std::wstring buffer(static_cast<size_t>(GetWindowTextLengthW(edit)) + 1, L'\0');
+        buffer.resize(static_cast<size_t>(GetWindowTextW(edit, buffer.data(), static_cast<int>(buffer.size()))));
+        credential.password = buffer;
+        SecureZeroMemory(buffer.data(), buffer.size() * sizeof(wchar_t));
+    }
+    const auto stored = ReadProxyCredential(address);
+    if (credential.user.empty()) {
+        if (stored) {
+            DeleteProxyCredential(address);   // логин стёрт — вход без пароля
+        }
+        return true;
+    }
+    if (credential.password.empty()) {
+        if (!stored) {
+            Message(dlg, L"Введите пароль для этого логина или очистите логин, если прокси вход не требует.",
+                    MB_ICONWARNING);
+            SetFocus(GetDlgItem(dlg, IDC_PROXY_PASSWORD));
+            return false;
+        }
+        if (stored->user == credential.user) {
+            return true;   // ничего не меняли
+        }
+        credential.password = stored->password;   // сменили только логин
+    }
+    std::wstring error;
+    if (!SaveProxyCredential(address, credential, &error)) {
+        Message(dlg, L"Логин и пароль не сохранены: " + error, MB_ICONWARNING);
+        return false;
+    }
+    return true;
+}
 
 INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -242,6 +307,8 @@ INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowLongPtrW(dlg, DWLP_USER, lp);
         SetDlgItemTextW(dlg, IDC_PROXY_ADDRESS, d->address.c_str());
         WrapLabel(dlg, IDC_PROXY_HINT);
+        WrapLabel(dlg, IDC_PROXY_AUTH_NOTE);
+        ShowProxyCredential(dlg, *d, d->address);
         SendDlgItemMessageW(dlg, IDC_PROXY_ADDRESS, EM_SETSEL, 0, -1);
         return TRUE;
     case WM_COMMAND:
@@ -249,6 +316,7 @@ INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             const std::wstring text = WindowText(GetDlgItem(dlg, IDC_PROXY_ADDRESS));
             const std::wstring state = text.empty() ? L"" : ParseProxyAddress(text) ? ProxyState(text) : L"Нужен IP-адрес и порт";
             SetDlgItemTextW(dlg, IDC_PROXY_STATE, state.c_str());
+            ShowProxyCredential(dlg, *d, text);
             return TRUE;
         }
         if (LOWORD(wp) == IDOK) {
@@ -256,6 +324,9 @@ INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (!address) {
                 Message(dlg, L"Адрес прокси — IP-адрес и порт, например 127.0.0.1:10808.", MB_ICONWARNING);
                 SetFocus(GetDlgItem(dlg, IDC_PROXY_ADDRESS));
+                return TRUE;
+            }
+            if (!ApplyProxyCredential(dlg, *address)) {
                 return TRUE;
             }
             d->address = FormatProxyAddress(*address);
@@ -274,7 +345,7 @@ INT_PTR CALLBACK ProxyDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // Спросить адрес прокси; nullopt — отмена
 std::optional<std::wstring> AskProxyAddress(HWND owner, const std::wstring& initial)
 {
-    ProxyDialog d{initial.empty() ? L"127.0.0.1:10808" : initial};
+    ProxyDialog d{initial.empty() ? L"127.0.0.1:10808" : initial, L"\x1"};
     if (DialogBoxParamW(g.instance, MAKEINTRESOURCEW(IDD_PROXY), owner, ProxyDialogProc,
                         reinterpret_cast<LPARAM>(&d)) != IDOK) {
         return std::nullopt;
@@ -634,7 +705,7 @@ void InitRuleDialog(HWND dlg, RuleDialog& d)
             selected = static_cast<int>(d.guids.size() - 1);
         }
     }
-    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Другой SOCKS5-прокси…"));
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Другой SOCKS5-прокси, логин и пароль…"));
     d.guids.push_back(kOtherProxy);
     SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(selected), 0);
     d.lastSelection = selected;
@@ -727,7 +798,7 @@ INT_PTR CALLBACK RuleDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 const int sel = ComboSelection(dlg, IDC_ADAPTER);
                 if (sel >= 0 && static_cast<size_t>(sel) < d->guids.size() && d->guids[static_cast<size_t>(sel)] == kOtherProxy) {
                     HWND combo = GetDlgItem(dlg, IDC_ADAPTER);
-                    if (const auto proxy = AskProxyAddress(dlg, L"")) {
+                    if (const auto proxy = AskProxyAddress(dlg, d->rule.proxy)) {   // прокси правила — сменить логин и пароль
                         const std::wstring id = std::wstring(kProxyPrefix) + *proxy;
                         auto existing = std::find(d->guids.begin(), d->guids.end(), id);
                         int index = static_cast<int>(existing - d->guids.begin());
