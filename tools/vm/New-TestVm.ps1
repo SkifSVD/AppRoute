@@ -5,7 +5,7 @@
     Неподписанный драйвер Windows загружает только в тестовом режиме (testsigning), а его не
     стоит включать на рабочей системе. Поэтому драйвер проверяется в отдельной ВМ.
 
-    Что делает скрипт: создаёт ВМ 2-го поколения (TPM, 4 ГБ памяти, 2 процессора, диск 64 ГБ)
+    Что делает скрипт: создаёт ВМ 2-го поколения (TPM, от 2 ГБ памяти, 2 процессора, диск 64 ГБ)
     с двумя сетевыми картами в «Default Switch» (NAT через сеть компьютера) — правило направляет
     программу во вторую, и видно, что трафик ушёл не через основную; вставляет ISO и включает
     службу гостевого копирования (Copy-VMFile). Существующую ВМ с тем же именем не трогает.
@@ -48,12 +48,12 @@ if (-not $switch) {
 
 New-Item -ItemType Directory -Force -Path $Path | Out-Null
 $vhd = Join-Path $Path "$Name.vhdx"
-New-VM -Name $Name -Generation 2 -MemoryStartupBytes 4GB -NewVHDPath $vhd -NewVHDSizeBytes 64GB `
+New-VM -Name $Name -Generation 2 -MemoryStartupBytes 2GB -NewVHDPath $vhd -NewVHDSizeBytes 64GB `
     -SwitchName 'Default Switch' -Path $Path | Out-Null
 Set-VMProcessor -VMName $Name -Count 2
 # Вторая сетевая карта: в неё правило направляет тестовую программу
 Add-VMNetworkAdapter -VMName $Name -SwitchName 'Default Switch' -Name 'AppRoute second'
-Set-VMMemory -VMName $Name -DynamicMemoryEnabled $true -MinimumBytes 2GB -MaximumBytes 6GB
+Set-VMMemory -VMName $Name -DynamicMemoryEnabled $true -MinimumBytes 1GB -MaximumBytes 6GB
 # Windows 11 требует TPM 2.0 и безопасную загрузку при установке
 Set-VMKeyProtector -VMName $Name -NewLocalKeyProtector
 Enable-VMTPM -VMName $Name
