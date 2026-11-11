@@ -1607,12 +1607,18 @@ std::wstring ManagerCommandText(bool running)
     return running ? L"Остановить &менеджер маршрутов" : L"Запустить &менеджер маршрутов…";
 }
 
-// Установка службы (#16): менеджер маршрутов работает постоянно, в том числе после перезагрузки.
-// Согласие уже получено в окне запуска; дальше — UAC.
-void InstallService()
+// Драйвер approute-wfp.sys лежит рядом с окном — его можно установить вместе со службой (#18)
+bool DriverAvailable()
 {
-    const std::wstring params =
-        L"install-service --config " + QuoteArgument(g.configPath) + L" --client-sid " + CurrentUserSid();
+    return GetFileAttributesW(BinPath(L"approute-wfp.sys").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Установка службы (#16): менеджер маршрутов работает постоянно, в том числе после перезагрузки.
+// withDriver — и драйвер (#18). Согласие уже получено в окне запуска; дальше — UAC.
+void InstallService(bool withDriver)
+{
+    const std::wstring params = L"install-service --config " + QuoteArgument(g.configPath) + L" --client-sid " +
+                                CurrentUserSid() + (withDriver ? L" --with-driver" : L"");
     std::wstring error;
     const auto code = RunRoutesElevated(params, &error);
     if (!code) {
@@ -1633,7 +1639,18 @@ void InstallService()
     for (int i = 0; i < 25 && !IsRouteManagerRunning(); ++i) {
         Sleep(200);
     }
-    SetStatus(L"Служба AppRoute установлена и запущена · журнал: %ProgramData%\\AppRoute\\routes.log");
+    if (withDriver && QueryWfpDriver() != WfpDriverState::Running) {
+        // Служба работает, драйвер — нет (например, подпись не принята): правила — как раньше
+        const std::wstring why = LastInstallMessage();
+        Message(g.main,
+                L"Служба AppRoute установлена и запущена, но драйвер approute-wfp не установлен.\n\n" +
+                    (why.empty() ? std::wstring(L"Правила действуют только для программ, запущенных через AppRoute.")
+                                 : why),
+                MB_ICONWARNING);
+    }
+    SetStatus(QueryWfpDriver() == WfpDriverState::Running
+                  ? L"Служба AppRoute и драйвер установлены · журнал: %ProgramData%\\AppRoute\\routes.log"
+                  : L"Служба AppRoute установлена и запущена · журнал: %ProgramData%\\AppRoute\\routes.log");
     RefreshStates();
 }
 
@@ -1654,7 +1671,7 @@ void UninstallService()
                 MB_ICONWARNING);
         return;
     }
-    SetStatus(L"Служба AppRoute удалена, изменения маршрутов откачены");
+    SetStatus(L"Служба AppRoute удалена (с драйвером, если он был), изменения маршрутов откачены");
     RefreshStates();
 }
 
@@ -1684,7 +1701,17 @@ void StartManager()
         return;
     }
     LoadAdapters();
-    const std::wstring details = DescribeManagerPlan();
+    std::wstring details = DescribeManagerPlan();
+    const bool driverAvailable = DriverAvailable() && QueryWfpDriver() == WfpDriverState::NotInstalled;
+    if (driverAvailable) {
+        details +=
+            L"\n\nДрайвер approute-wfp (по флажку ниже, только вместе со службой) — драйвер ядра Windows. Он "
+            L"привязывает соединения программ с правилами к адресу их интерфейса, как бы программа ни была "
+            L"запущена (ярлык, автозапуск, другая программа), — в том числе звонки, которые сами выбирают "
+            L"интерфейс. Драйвер не видит содержимое трафика и не принимает команд от программ: какие программы и "
+            L"куда, ему сообщает только служба AppRoute через брандмауэр Windows (WFP). Действует только на ваши "
+            L"программы. Удаляется вместе со службой.";
+    }
     const TASKDIALOG_BUTTON buttons[] = {
         {100, L"Запустить менеджер маршрутов\nДо остановки или перезагрузки. Windows попросит подтвердить права "
               L"администратора"},
@@ -1715,14 +1742,26 @@ void StartManager()
     tdc.cButtons = static_cast<UINT>(std::size(buttons));
     tdc.nDefaultButton = 101;
     tdc.pfCallback = ConsentCallback;
+    if (driverAvailable) {
+        // Отдельное явное согласие на драйвер ядра; по умолчанию — нет
+        tdc.pszVerificationText = L"Вместе со службой установить драйвер approute-wfp — правила и для программ, "
+                                  L"запущенных не через AppRoute (подробности выше)";
+    }
     int choice = 0;
-    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, nullptr)) || (choice != 100 && choice != 102)) {
+    BOOL withDriver = FALSE;
+    if (FAILED(TaskDialogIndirect(&tdc, &choice, nullptr, driverAvailable ? &withDriver : nullptr)) ||
+        (choice != 100 && choice != 102)) {
         SetStatus(L"Менеджер маршрутов не запущен");
         return;
     }
     if (choice == 102) {
-        InstallService();
+        InstallService(withDriver == TRUE);
         return;
+    }
+    if (withDriver) {
+        Message(g.main,
+                L"Драйвер устанавливается только вместе со службой. Менеджер маршрутов запускается без него.",
+                MB_ICONINFORMATION);
     }
 
     // Канал менеджера будет доступен только этому пользователю (и его окну approute-gui)
