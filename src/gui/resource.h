@@ -26,6 +26,7 @@
 #define IDC_MANAGER         1012
 #define IDM_TRAY_MANAGER    1063
 #define IDM_TRAY_UNINSTALL  1064
+#define IDM_TRAY_LOGS       1065
 #define IDM_SHORTCUT_DESKTOP 1051
 #define IDM_TRAY_OPEN       1061
 #define IDM_TRAY_EXIT       1062
