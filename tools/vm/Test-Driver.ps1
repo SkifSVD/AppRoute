@@ -49,6 +49,15 @@ function UdpSource {
     (& $udpExe -NoProfile -Command $script 2>$null) | Select-Object -Last 1
 }
 
+# Фильтры провайдера AppRoute («слой→действие») по выгрузке netsh
+function OurFilters {
+    $xml = Join-Path $dir 'filters.xml'
+    netsh wfp show filters file="$xml" | Out-Null
+    [xml]$doc = Get-Content $xml -Raw
+    @($doc.SelectNodes('//filters/item') | Where-Object { $_.providerKey -eq '{a8d57f59-f21a-4dea-ab4d-737811dba2dc}' } |
+        ForEach-Object { '{0}→{1}' -f ($_.layerKey -replace '^FWPM_LAYER_', ''), $_.action.type })
+}
+
 $before = TcpLocalIp
 Check 'без правил curl выходит с основной карты' ($before -eq $main.IPAddress) "локальный адрес: $before"
 
@@ -58,8 +67,14 @@ Check 'драйвер загружен' ((Get-Service approute-wfp -ErrorAction 
 
 # --- правила
 $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
-$wfp = Start-Process $routes -ArgumentList 'wfp', '--config', "`"$config`"", '--client-sid', $sid -PassThru -WindowStyle Minimized
+$wfpLog = Join-Path $dir 'wfp-output.txt'
+$wfpErr = Join-Path $dir 'wfp-errors.txt'
+$wfp = Start-Process $routes -ArgumentList 'wfp', '--config', "`"$config`"", '--client-sid', $sid -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $wfpLog -RedirectStandardError $wfpErr
 Start-Sleep 3
+Check 'approute-routes wfp работает' (-not $wfp.HasExited) $(if ($wfp.HasExited) { "завершился с кодом $($wfp.ExitCode)" })
+$active = OurFilters
+Check 'фильтры AppRoute добавлены' ($active.Count -gt 0) ($active -join '; ')
 $tcp = TcpLocalIp
 Check 'TCP (curl) — с адреса второй карты' ($tcp -eq $second.IPAddress) "локальный адрес: $tcp"
 $udp = UdpSource
@@ -74,8 +89,8 @@ Stop-Process -Id $wfp.Id -Force
 Start-Sleep 2
 $after = TcpLocalIp
 Check 'после снятия правил curl снова с основной карты' ($after -eq $main.IPAddress) "локальный адрес: $after"
-$left = @(netsh wfp show filters file=- 2>$null | Select-String 'AppRoute').Count
-Check 'фильтров AppRoute не осталось' ($left -eq 0) "найдено строк: $left"
+$left = @(OurFilters).Count
+Check 'фильтров AppRoute не осталось' ($left -eq 0) "найдено: $left"
 
 & $routes uninstall-driver
 Check 'драйвер выгружен' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
@@ -83,3 +98,5 @@ Check 'драйвер выгружен' (-not (Get-Service approute-wfp -ErrorAc
 Write-Host ''
 Write-Host '=== Итог (скопируйте в чат) ==='
 $results
+'--- вывод approute-routes wfp ---'
+Get-Content $wfpLog, $wfpErr -Encoding UTF8 -ErrorAction SilentlyContinue
