@@ -57,6 +57,10 @@ std::vector<DWORD> ImageRunsWithoutRule(const std::wstring& image, DWORD exceptP
 // Текст предупреждения: программа уже запущена без AppRoute
 std::wstring AlreadyRunningWarning(const std::wstring& image, size_t processes);
 
+// Нет файла AppRoute (#72) — понятный текст: возможно, файл убран антивирусом в карантин;
+// восстановить его или переустановить AppRoute
+std::wstring MissingAppRouteFileMessage(const std::wstring& path);
+
 // Запрос на запуск по правилу конфига; commandLine — программа и аргументы (для приложения из
 // пакета программа — его AUMID, аргументы передаются активации). Переопределения (параметры
 // командной строки approute-run) вызывающий применяет поверх.

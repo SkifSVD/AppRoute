@@ -232,8 +232,7 @@ LaunchResult LaunchPackage(const LaunchRequest& request, const EnvVars& vars, co
     constexpr bool self32 = sizeof(void*) == 4;
     const std::wstring helper = InjectHelperPath(binDir, self32);
     if (GetFileAttributesW(helper.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        return fail(LaunchStatus::InjectFailed, ERROR_FILE_NOT_FOUND,
-                    std::format(L"Не найден {} — он нужен для запуска приложений из пакетов", helper));
+        return fail(LaunchStatus::InjectFailed, ERROR_FILE_NOT_FOUND, MissingAppRouteFileMessage(helper));
     }
     const bool runningWithoutRule = PackageRunsWithoutRule(package->fullName);
 
@@ -404,6 +403,15 @@ std::wstring ResolveProgramPath(const std::wstring& commandLine)
     return token;
 }
 
+std::wstring MissingAppRouteFileMessage(const std::wstring& path)
+{
+    return std::format(L"Нет файла AppRoute:\n{}\n\nВозможно, его убрал в карантин антивирус. Если файл скачан из "
+                       L"выпусков AppRoute и вы уверены, что это ложное срабатывание, восстановите его из карантина "
+                       L"(и сообщите производителю антивируса) или переустановите AppRoute тем же установщиком — "
+                       L"недостающие файлы вернутся.",
+                       path);
+}
+
 LaunchResult LaunchWithRule(const LaunchRequest& request)
 {
     const std::wstring binDir =
@@ -462,6 +470,12 @@ LaunchResult LaunchWithRule(const LaunchRequest& request)
 
     const DWORD rc = InjectRuleDll(pi.hProcess, binDir);
     if (rc != NO_ERROR) {
+        // Нет hook-DLL или помощника (#72) — например, их убрал в карантин антивирус
+        for (const std::wstring& file : {HookDllPath(binDir, result.is32Bit), InjectHelperPath(binDir, result.is32Bit)}) {
+            if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                return abort(LaunchStatus::InjectFailed, rc, MissingAppRouteFileMessage(file));
+            }
+        }
         std::wstring hint;
         if (rc == ERROR_MOD_NOT_FOUND || rc == ERROR_FILE_NOT_FOUND) {
             hint = std::format(L" (нужны {} и {} рядом с программой)",
