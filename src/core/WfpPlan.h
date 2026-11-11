@@ -42,4 +42,7 @@ APPROUTE_TARGET MakeWfpTarget(const NetAdapter* a, const Rule& rule);
 
 bool SameWfpTarget(const APPROUTE_TARGET& a, const APPROUTE_TARGET& b);
 
+// Планы дают одинаковые объекты WFP (заметки не сравниваются): повторно применять не нужно.
+bool SameWfpPlan(const WfpPlan& a, const WfpPlan& b);
+
 } // namespace approute

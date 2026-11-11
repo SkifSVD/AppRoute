@@ -27,4 +27,5 @@ foreach ($f in $files) {
 }
 Write-Host "Скопировано в ВМ «$Name», C:\AppRouteTest: $($files.Count) файлов."
 Write-Host 'В ВМ: Windows PowerShell от имени администратора →'
-Write-Host '    powershell -ExecutionPolicy Bypass -File C:\AppRouteTest\Test-Driver.ps1'
+Write-Host '    powershell -ExecutionPolicy Bypass -File C:\AppRouteTest\Test-Driver.ps1            (драйвер и wfp)'
+Write-Host '    powershell -ExecutionPolicy Bypass -File C:\AppRouteTest\Test-Driver.ps1 -Service   (служба с драйвером)'

@@ -49,11 +49,16 @@ bool StopAppRouteService(std::wstring* error, DWORD waitMs = 15000);
 // InstallDirectory(), регистрация или обновление службы, ярлык «AppRoute» в меню «Пуск» для
 // всех пользователей, запуск. Работающая служба сначала останавливается (её изменения
 // откатываются).
+//
+// withDriver — заодно установить драйвер approute-wfp.sys из sourceDir (#18): правила тогда
+// действуют для программ, запущенных любым способом. Драйвер не установился (нет файла,
+// подпись не принята) — служба всё равно ставится, причина — в *driverNote.
 bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& configPath,
-                            const std::wstring& clientSid, std::wstring* error);
+                            const std::wstring& clientSid, std::wstring* error, bool withDriver = false,
+                            std::wstring* driverNote = nullptr);
 
-// Удаление (нужны права администратора): остановка (откат изменений), удаление службы, файлов
-// и ярлыка. Занятые файлы удаляются при перезагрузке.
+// Удаление (нужны права администратора): остановка (откат изменений), удаление службы, драйвера,
+// файлов и ярлыка. Занятые файлы удаляются при перезагрузке.
 bool UninstallAppRouteService(std::wstring* error);
 
 // Драйвер approute-wfp.sys (#18): копируется в InstallDirectory() (туда пишут только
@@ -63,6 +68,11 @@ inline constexpr wchar_t kDriverServiceName[] = L"approute-wfp";
 bool InstallWfpDriver(const std::wstring& sysPath, std::wstring* error);
 // Остановка и удаление службы драйвера и файла.
 bool UninstallWfpDriver(std::wstring* error);
+
+enum class WfpDriverState { NotInstalled, Stopped, Running };
+WfpDriverState QueryWfpDriver();
+// Запустить установленный драйвер (нужны права администратора). true — работает.
+bool StartWfpDriver(std::wstring* error);
 
 // Журнал службы: dir создаётся с доступом SYSTEM/администраторы (пользователи — чтение).
 // Существующая папка с другим владельцем (её мог заранее создать кто угодно) отодвигается в

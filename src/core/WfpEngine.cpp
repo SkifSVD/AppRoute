@@ -320,21 +320,4 @@ bool WfpEngine::Apply(const WfpPlan& plan, std::vector<std::wstring>* notes, std
     return true;
 }
 
-bool IsWfpDriverRunning()
-{
-    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!scm) {
-        return false;
-    }
-    SC_HANDLE service = OpenServiceW(scm, L"approute-wfp", SERVICE_QUERY_STATUS);
-    bool running = false;
-    if (service) {
-        SERVICE_STATUS status{};
-        running = QueryServiceStatus(service, &status) && status.dwCurrentState == SERVICE_RUNNING;
-        CloseServiceHandle(service);
-    }
-    CloseServiceHandle(scm);
-    return running;
-}
-
 } // namespace approute

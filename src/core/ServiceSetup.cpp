@@ -271,7 +271,8 @@ bool StopAppRouteService(std::wstring* error, DWORD waitMs)
 }
 
 bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& configPath,
-                            const std::wstring& clientSid, std::wstring* error)
+                            const std::wstring& clientSid, std::wstring* error, bool withDriver,
+                            std::wstring* driverNote)
 {
     if (clientSid.empty() || configPath.empty()) {
         return Fail(error, L"не указан пользователь или файл правил", 0);
@@ -327,6 +328,25 @@ bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& c
         return false;
     }
 
+    // Драйвер — до запуска службы: она применяет правила через него сразу при старте
+    bool driverInstalled = false;
+    if (withDriver) {
+        std::wstring why;
+        const std::wstring sys = sourceDir + L"\\approute-wfp.sys";
+        if (GetFileAttributesW(sys.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            why = L"нет файла " + sys;
+        } else if (InstallWfpDriver(sys, &why)) {
+            driverInstalled = true;
+        } else {
+            std::wstring ignored;
+            UninstallWfpDriver(&ignored);   // не оставляем незагружаемую службу драйвера
+        }
+        if (driverNote && !driverInstalled) {
+            *driverNote = L"драйвер approute-wfp не установлен (" + why +
+                          L") — правила действуют только для программ, запущенных через AppRoute";
+        }
+    }
+
     // Ярлык установленного окна: только оно может управлять менеджером по каналу
     ShortcutSpec spec;
     spec.target = dir + L"\\approute-gui.exe";
@@ -340,6 +360,9 @@ bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& c
         // Не оставляем в системе службу, которая не запускается: откат установки
         const DWORD code = GetLastError();
         DeleteService(service);
+        if (driverInstalled) {
+            UninstallWfpDriver(&ignored);
+        }
         RemoveInstalledFiles(dir);
         std::wstring why = L"служба не запустилась (" + Win32ErrorMessage(code) + L"), установка отменена";
         if (code == ERROR_ACCESS_DENIED) {
@@ -368,6 +391,10 @@ bool UninstallAppRouteService(std::wstring* error)
         }
     } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST) {
         return Fail(error, L"нет доступа к службе AppRoute");
+    }
+    // Служба остановлена — её фильтры WFP сняты, драйвер можно выгрузить
+    if (!UninstallWfpDriver(error)) {
+        return false;
     }
     RemoveInstalledFiles(InstallDirectory());
     return true;
@@ -441,6 +468,39 @@ bool UninstallWfpDriver(std::wstring* error)
         return Fail(error, L"нет доступа к службе драйвера");
     }
     RemoveFile(InstallDirectory() + L"\\approute-wfp.sys");
+    return true;
+}
+
+WfpDriverState QueryWfpDriver()
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    if (!scm.h) {
+        return WfpDriverState::NotInstalled;
+    }
+    ScHandle service(OpenServiceW(scm.h, kDriverServiceName, SERVICE_QUERY_STATUS));
+    if (!service.h) {
+        return WfpDriverState::NotInstalled;
+    }
+    SERVICE_STATUS status{};
+    if (QueryServiceStatus(service.h, &status) && status.dwCurrentState == SERVICE_RUNNING) {
+        return WfpDriverState::Running;
+    }
+    return WfpDriverState::Stopped;
+}
+
+bool StartWfpDriver(std::wstring* error)
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    if (!scm.h) {
+        return Fail(error, L"нет доступа к диспетчеру служб");
+    }
+    ScHandle service(OpenServiceW(scm.h, kDriverServiceName, SERVICE_START | SERVICE_QUERY_STATUS));
+    if (!service.h) {
+        return Fail(error, L"нет доступа к службе драйвера");
+    }
+    if (!StartServiceW(service.h, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+        return Fail(error, L"драйвер не загрузился");
+    }
     return true;
 }
 

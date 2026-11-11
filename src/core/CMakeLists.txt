@@ -21,6 +21,7 @@ add_library(approute_core STATIC
     Socks5.h        Socks5.cpp
     WfpPlan.h       WfpPlan.cpp
     WfpEngine.h     WfpEngine.cpp
+    WfpRules.h      WfpRules.cpp
     ../driver/AppRouteWfpShared.h
     Policy.h
 )

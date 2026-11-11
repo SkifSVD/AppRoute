@@ -129,3 +129,31 @@ TEST(WfpTargetPolicy)
     b.v4[3] = 2;   // DHCP выдал другой адрес — контекст нужно обновить
     CHECK(!SameWfpTarget(a, b));
 }
+
+// Повторное применение только при изменении (#18, служба): адрес интерфейса, правила, подсети
+TEST(WfpPlanSame)
+{
+    Config c;
+    c.rules = {MakeRule(L"C:\\Apps\\tg.exe", kVpn)};
+    const std::wstring sid = L"S-1-5-21-1-2-3-1001";
+    const std::vector<NetAdapter> base = {Adapter(7, kVpn, {V4("10.8.0.6", 24)})};
+    const WfpPlan a = WfpPlanFromConfig(c, base, sid);
+    CHECK(SameWfpPlan(a, WfpPlanFromConfig(c, base, sid)));
+
+    // Регистр пути и SID не важен
+    Config upper = c;
+    upper.rules[0].app = L"C:\\APPS\\TG.EXE";
+    CHECK(SameWfpPlan(a, WfpPlanFromConfig(upper, base, L"s-1-5-21-1-2-3-1001")));
+
+    // Новый адрес VPN (переподключение) — цель другая
+    CHECK(!SameWfpPlan(a, WfpPlanFromConfig(c, {Adapter(7, kVpn, {V4("10.8.0.7", 24)})}, sid)));
+    // Та же цель, другая подсеть — другие исключения
+    CHECK(!SameWfpPlan(a, WfpPlanFromConfig(c, {Adapter(7, kVpn, {V4("10.8.0.6", 16)})}, sid)));
+    // VPN отключён
+    CHECK(!SameWfpPlan(a, WfpPlanFromConfig(c, {Adapter(7, kVpn, {V4("10.8.0.6", 24)}, false)}, sid)));
+    // Ещё одно правило, другой пользователь
+    Config more = c;
+    more.rules.push_back(MakeRule(L"C:\\Apps\\b.exe", kVpn));
+    CHECK(!SameWfpPlan(a, WfpPlanFromConfig(more, base, sid)));
+    CHECK(!SameWfpPlan(a, WfpPlanFromConfig(c, base, L"S-1-5-21-1-2-3-1002")));
+}

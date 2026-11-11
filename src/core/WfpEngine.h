@@ -46,7 +46,4 @@ private:
     std::vector<UINT64> contextIds_;
 };
 
-// Служба драйвера approute-wfp запущена (драйвер загружен).
-bool IsWfpDriverRunning();
-
 } // namespace approute
