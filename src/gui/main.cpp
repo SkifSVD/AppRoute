@@ -1642,6 +1642,16 @@ std::wstring BinPath(const wchar_t* file)
     return self.substr(0, self.find_last_of(L'\\') + 1) + file;
 }
 
+// Файл AppRoute на месте; нет (например, убран антивирусом в карантин) — понятное сообщение (#72)
+bool BinaryPresent(const std::wstring& path)
+{
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+    Message(g.main, MissingAppRouteFileMessage(path), MB_ICONWARNING);
+    return false;
+}
+
 // Что менеджер сделает сейчас: политика из конфига и план изменений (без прав администратора)
 std::wstring DescribeManagerPlan()
 {
@@ -1695,6 +1705,10 @@ HRESULT CALLBACK ConsentCallback(HWND dialog, UINT msg, WPARAM, LPARAM, LONG_PTR
 std::optional<DWORD> RunRoutesElevated(const std::wstring& params, std::wstring* error)
 {
     const std::wstring routes = BinPath(L"approute-routes.exe");
+    if (!BinaryPresent(routes)) {
+        *error = L"нет файла approute-routes.exe";
+        return std::nullopt;
+    }
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
@@ -1925,6 +1939,10 @@ void StartManager()
 
     // Канал менеджера будет доступен только этому пользователю (и его окну approute-gui)
     const std::wstring routes = BinPath(L"approute-routes.exe");
+    if (!BinaryPresent(routes)) {
+        SetStatus(L"Менеджер маршрутов не запущен: нет файла approute-routes.exe");
+        return;
+    }
     const std::wstring params =
         L"serve --config " + QuoteArgument(g.configPath) + L" --client-sid " + CurrentUserSid();
     SHELLEXECUTEINFOW sei{};

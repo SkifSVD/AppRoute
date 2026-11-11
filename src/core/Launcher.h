@@ -48,6 +48,10 @@ struct LaunchResult {
 
 LaunchResult LaunchWithRule(const LaunchRequest& request);
 
+// Нет файла AppRoute (#72) — понятный текст: возможно, файл убран антивирусом в карантин;
+// восстановить его или переустановить AppRoute
+std::wstring MissingAppRouteFileMessage(const std::wstring& path);
+
 // Запрос на запуск по правилу конфига; commandLine — программа и аргументы (для приложения из
 // пакета программа — его AUMID, аргументы передаются активации). Переопределения (параметры
 // командной строки approute-run) вызывающий применяет поверх.
