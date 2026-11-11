@@ -15,6 +15,10 @@
 #include <optional>
 #include <string>
 
+namespace approute {
+struct ProxyCredential;
+}
+
 namespace approute::hook {
 
 // Оригиналы Winsock: поток реле и рукопожатие не должны проходить через перехватчики
@@ -26,7 +30,8 @@ struct UdpRelayApi {
     decltype(&::getsockname) getsockname = nullptr;
 };
 
-void UdpRelayInit(const SOCKADDR_INET& proxy, const UdpRelayApi& api);
+// credential — логин и пароль прокси (#56) или nullptr; должен жить до конца процесса
+void UdpRelayInit(const SOCKADDR_INET& proxy, const ProxyCredential* credential, const UdpRelayApi& api);
 
 // Есть ли хоть одна ассоциация (иначе подменять адреса отправителя не нужно)
 bool UdpRelayActive();

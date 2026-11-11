@@ -20,6 +20,7 @@
 
 #include "core/Policy.h"
 #include "core/Process.h"
+#include "core/ProxyCredentials.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
 
@@ -44,6 +45,7 @@ bool g_installed = false;
 
 // Правило «прокси» (#17)
 std::optional<SOCKADDR_INET> g_proxy;
+std::optional<ProxyCredential> g_credential;   // логин и пароль прокси (#56), из диспетчера учётных данных
 FakeIpPool g_fakeIps;
 bool g_fakeDns = false;
 SRWLOCK g_proxiedLock = SRWLOCK_INIT;
@@ -415,12 +417,14 @@ ProxyOutcome ConnectViaProxy(SOCKET s, const sockaddr* dest, int destLen, const 
     }
 
     char reply[262] = {};
-    if (!SendAll(s, Socks5Greeting(), deadline) || !RecvExact(s, reply, 2, deadline)) {
-        return fail(L"нет ответа на приветствие SOCKS5");
-    }
-    if (!Socks5NoAuthAccepted(std::string_view(reply, 2))) {
-        WSASetLastError(WSAECONNREFUSED);
-        return fail(L"прокси требует аутентификацию (поддерживается только без неё)");
+    const Socks5Auth auth = Socks5Negotiate([&](std::string_view data) { return SendAll(s, data, deadline); },
+                                            [&](char* out, size_t size) { return RecvExact(s, out, size, deadline); },
+                                            g_credential ? &*g_credential : nullptr);
+    if (auth != Socks5Auth::Ok) {
+        if (auth != Socks5Auth::NoAnswer) {
+            WSASetLastError(WSAECONNREFUSED);
+        }
+        return fail(Socks5AuthText(auth));
     }
     std::optional<std::string> request =
         host ? Socks5ConnectRequest(*host, PortOf(target)) : std::optional<std::string>(Socks5ConnectRequest(target));
@@ -1090,7 +1094,9 @@ void Install()
             Log(L"неверный адрес прокси в %ls: %ls", kEnvProxy, proxy);
             return;
         }
-        // Резолвер без интерфейса: нужен только для локальных подсетей
+        // Резолвер без интерфейса: нужен только для локальных подсетей. Логин и пароль прокси
+        // (если заданы) — из диспетчера учётных данных этого пользователя, не из окружения
+        g_credential = ReadProxyCredential(*g_proxy);
     } else if (GetEnvironmentVariableW(kEnvAdapter, guid, static_cast<DWORD>(std::size(guid))) == 0) {
         return;   // правило не задано — DLL ничего не делает
     } else if (!g_resolver.Init(guid)) {
@@ -1150,7 +1156,7 @@ void Install()
         api.recvfrom = Real_recvfrom;
         api.closesocket = Real_closesocket;
         api.getsockname = Real_getsockname;
-        UdpRelayInit(*g_proxy, api);
+        UdpRelayInit(*g_proxy, g_credential ? &*g_credential : nullptr, api);
     }
     g_fakeDns = CreateDnsHooks(g_resolver, g_policy, g_proxy ? &g_fakeIps : nullptr);
     CreateProcessHooks(config);
@@ -1162,7 +1168,8 @@ void Install()
     }
     g_installed = true;
     if (g_proxy) {
-        Log(L"активен в %ls, прокси SOCKS5 %ls, имена разрешает прокси: %ls", exe, FormatProxyAddress(*g_proxy).c_str(),
+        Log(L"активен в %ls, прокси SOCKS5 %ls%ls, имена разрешает прокси: %ls", exe,
+            FormatProxyAddress(*g_proxy).c_str(), g_credential ? L" (с логином и паролем)" : L"",
             g_fakeDns ? L"да" : L"нет");
     } else {
         Log(L"активен в %ls, интерфейс %ls, без интерфейса: %ls", exe, guid,
