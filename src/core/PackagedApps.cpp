@@ -3,6 +3,7 @@
 #include "core/Com.h"
 #include "core/Util.h"
 
+#include <appmodel.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 
@@ -289,6 +290,48 @@ std::optional<PackageExecutables> FindPackageExecutables(std::wstring_view app, 
     } catch (const winrt::hresult_error& e) {
         return fail(HrMessage(e));
     }
+}
+
+std::optional<InstalledPackage> FindInstalledPackage(std::wstring_view app, std::wstring* error)
+{
+    auto exes = FindPackageExecutables(app, L"", error);
+    if (!exes) {
+        return std::nullopt;
+    }
+    try {
+        WinRtScope com;
+        const auto package = FindMainPackage(PackageFamilyOf(app), L"");
+        if (!package) {
+            if (error) {
+                *error = L"пакет не установлен у пользователя";
+            }
+            return std::nullopt;
+        }
+        InstalledPackage out;
+        out.fullName = std::wstring(package->Id().FullName());
+        out.installedPath = std::wstring(package->InstalledPath());
+        out.executables = std::move(*exes);
+        return out;
+    } catch (const winrt::hresult_error& e) {
+        if (error) {
+            *error = HrMessage(e);
+        }
+        return std::nullopt;
+    }
+}
+
+std::wstring ProcessPackageFullName(HANDLE process)
+{
+    UINT32 length = 0;
+    if (GetPackageFullName(process, &length, nullptr) != ERROR_INSUFFICIENT_BUFFER || length == 0) {
+        return {};
+    }
+    std::wstring name(length, L'\0');
+    if (GetPackageFullName(process, &length, name.data()) != ERROR_SUCCESS) {
+        return {};
+    }
+    name.resize(wcslen(name.c_str()));
+    return name;
 }
 
 std::wstring PackagedAppName(std::wstring_view app)

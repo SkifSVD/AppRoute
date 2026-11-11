@@ -1036,8 +1036,8 @@ void UpdateAppStep(HWND page, Wizard& w)
     std::wstring chosen;
     if (!w.rule.app.empty()) {
         chosen = IsPackageApp(w.rule.app)
-                     ? L"Выбрано: " + AppTitle(w.rule.app) + L" — приложение из пакета, правило действует "
-                                                               L"через драйвер WFP"
+                     ? L"Выбрано: " + AppTitle(w.rule.app) + L" — приложение из пакета, запускайте его "
+                                                               L"через AppRoute"
                      : L"Выбрано: " + w.rule.app;
     } else if (!w.appsLoaded) {
         chosen = L"Загружается список программ…";
@@ -1156,11 +1156,10 @@ INT_PTR CALLBACK WizardAppPage(HWND page, UINT msg, WPARAM wp, LPARAM lp)
                 StayOnPage(page);
             } else if (IsPackageApp(w->rule.app) && QueryWfpDriver() != WfpDriverState::Running) {
                 Message(page,
-                        L"Приложение из Microsoft Store или MSIX нельзя запустить через AppRoute с внедрением, "
-                        L"поэтому правило для него действует только через драйвер WFP: приложение "
-                        L"запускается как обычно, а трафик направляет драйвер.\n\n"
-                        L"Драйвер сейчас не запущен. Правило сохранится и начнёт действовать после "
-                        L"установки службы с драйвером.",
+                        L"Правило для приложения из Microsoft Store или MSIX действует, когда оно запущено "
+                        L"через AppRoute: кнопкой «Запустить» или ярлыком AppRoute.\n\n"
+                        L"При запуске из меню «Пуск» или другой программой правило применяет только драйвер "
+                        L"WFP, а он сейчас не запущен.",
                         MB_ICONINFORMATION);
             }
             return TRUE;
@@ -1309,15 +1308,6 @@ INT_PTR CALLBACK WizardAdapterPage(HWND page, UINT msg, WPARAM, LPARAM lp)
         }
         if (hdr->idFrom == IDC_WIF_LIST && hdr->code == NM_DBLCLK && !TargetId(w->rule).empty()) {
             PropSheet_PressButton(w->sheet, PSBTN_NEXT);
-            return TRUE;
-        }
-        if (hdr->code == PSN_WIZNEXT && IsPackageApp(w->rule.app) &&
-            (!w->rule.proxy.empty() || TargetId(w->rule) == kOtherProxy)) {
-            Message(page,
-                    L"Для приложения из пакета нужен интерфейс: правило действует через драйвер WFP, "
-                    L"а прокси — только для программ, запущенных через AppRoute.",
-                    MB_ICONINFORMATION);
-            NotifyResult(page, -1);
             return TRUE;
         }
         if (hdr->code == PSN_WIZNEXT && TargetId(w->rule) == kOtherProxy) {
@@ -2144,32 +2134,6 @@ void RemoveSelected()
     Save(L"Правило удалено", next);
 }
 
-// Приложение из пакета: штатная активация Windows, правило применяет драйвер WFP (#45)
-void LaunchPackageRule(const Rule& rule)
-{
-    const std::wstring title = AppTitle(rule.app);
-    const bool driver = QueryWfpDriver() == WfpDriverState::Running;
-    if (!driver &&
-        Message(g.main,
-                std::format(L"Правило для «{}» действует только через драйвер WFP, а он не запущен — "
-                            L"приложение запустится без правила.\n\nЗапустить всё равно?",
-                            title),
-                MB_ICONWARNING | MB_YESNO) != IDYES) {
-        return;
-    }
-    SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-    DWORD pid = 0;
-    std::wstring error;
-    if (!LaunchPackagedApp(rule.app, L"", &pid, &error)) {
-        Message(g.main, std::format(L"Не удалось запустить «{}»: {}", title, error), MB_ICONWARNING);
-        SetStatus(L"Не запущено: " + error);
-        return;
-    }
-    SetStatus(driver ? std::format(L"Запущено: {} (PID {}) — трафик через «{}» (драйвер WFP)", title, pid,
-                                   TargetLabel(rule))
-                     : std::format(L"Запущено без правила: {} (PID {})", title, pid));
-}
-
 void LaunchSelected()
 {
     const auto index = SelectedRule();
@@ -2177,10 +2141,6 @@ void LaunchSelected()
         return;
     }
     const Rule& rule = g.config.rules[*index];
-    if (IsPackageApp(rule.app)) {
-        LaunchPackageRule(rule);
-        return;
-    }
     LaunchRequest request = RequestForRule(rule, CommandLineForApp(rule.app));
     request.inheritStdHandles = false;
 
@@ -2191,9 +2151,15 @@ void LaunchSelected()
         SetStatus(L"Не запущено: " + result.message);
         return;
     }
-    CloseHandle(result.process);
-    SetStatus(std::format(L"Запущено: {} (PID {}{}) — трафик через «{}»", FileNameOf(result.image), result.pid,
+    if (result.process) {
+        CloseHandle(result.process);
+    }
+    SetStatus(std::format(L"Запущено: {} (PID {}{}) — трафик через «{}»",
+                          IsPackageApp(rule.app) ? AppTitle(rule.app) : FileNameOf(result.image), result.pid,
                           result.is32Bit ? L", 32-бит" : L"", TargetLabel(rule)));
+    if (!result.warning.empty()) {
+        Message(g.main, result.warning, MB_ICONINFORMATION);
+    }
 }
 
 std::wstring KnownFolder(REFKNOWNFOLDERID id)
@@ -2217,7 +2183,13 @@ void CreateShortcutForSelected()
     }
     const Rule& rule = g.config.rules[*index];
     std::wstring error;
-    const auto spec = LaunchShortcutFor(rule, ThisExe(), g.configPath, &error);
+    std::wstring packageExe;
+    if (IsPackageApp(rule.app)) {
+        if (const auto exes = FindPackageExecutables(rule.app, L"", nullptr)) {
+            packageExe = exes->main;
+        }
+    }
+    const auto spec = LaunchShortcutFor(rule, ThisExe(), g.configPath, &error, packageExe);
     if (!spec) {
         Message(g.main, error, MB_ICONINFORMATION);
         return;
@@ -2244,7 +2216,8 @@ void CreateShortcutForSelected()
         folder += L"\\AppRoute";
         CreateDirectoryW(folder.c_str(), nullptr);
     }
-    const std::wstring lnk = folder + L"\\" + LaunchShortcutFileName(rule);
+    const std::wstring lnk =
+        folder + L"\\" + LaunchShortcutFileName(rule, IsPackageApp(rule.app) ? AppTitle(rule.app) : L"");
     if (GetFileAttributesW(lnk.c_str()) != INVALID_FILE_ATTRIBUTES &&
         Message(g.main, std::format(L"Ярлык уже есть:\n{}\n\nЗаменить его?", lnk), MB_ICONQUESTION | MB_YESNO) != IDYES) {
         return;
@@ -2530,12 +2503,17 @@ int RunFromShortcut(const Arguments& args)
     request.inheritStdHandles = false;
     const LaunchResult result = LaunchWithRule(request);
     if (!result.Ok()) {
-        Message(nullptr, std::format(L"Не удалось запустить «{}» через AppRoute:\n\n{}", FileNameOf(app),
+        Message(nullptr, std::format(L"Не удалось запустить «{}» через AppRoute:\n\n{}", AppTitle(app),
                                      result.message),
                 MB_ICONWARNING);
         return 1;
     }
-    CloseHandle(result.process);
+    if (result.process) {
+        CloseHandle(result.process);
+    }
+    if (!result.warning.empty()) {
+        Message(nullptr, result.warning, MB_ICONINFORMATION);
+    }
     return 0;
 }
 
@@ -2548,6 +2526,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     g.configPath = args.config;
     // COM: ярлыки (IShellLink) и диалог выбора файла
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    RestorePackageDebugging();   // режим отладки пакета, оставшийся после прерванного запуска (#59)
     if (args.run) {
         return RunFromShortcut(args);
     }

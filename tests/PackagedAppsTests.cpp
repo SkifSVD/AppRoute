@@ -1,5 +1,6 @@
-// Тесты приложений из пакетов MSIX (issue #45).
+// Тесты приложений из пакетов MSIX (issues #45, #59).
 
+#include "core/Launcher.h"
 #include "core/PackagedApps.h"
 #include "core/Shortcuts.h"
 #include "core/WfpPlan.h"
@@ -74,11 +75,40 @@ TEST(PackageRuleChecks)
     r.adapter = kVpn;
     CHECK(!ValidateRule(r));
     r.adapter.clear();
-    r.proxy = L"127.0.0.1:10808";   // прокси — только при запуске через AppRoute
-    CHECK(ValidateRule(r).has_value());
+    r.proxy = L"127.0.0.1:10808";   // прокси — при запуске через AppRoute (#59)
+    CHECK(!ValidateRule(r));
 
+    // Ярлык AppRoute для приложения из пакета (#59): --run AUMID, значок — exe пакета
     std::wstring error;
-    CHECK(!LaunchShortcutFor(r, L"C:\\AppRoute\\approute-run.exe", L"", &error) && !error.empty());
+    const auto spec = LaunchShortcutFor(r, L"C:\\AR\\approute-gui.exe", L"", &error, L"C:\\Pkg\\app\\Claude.exe");
+    CHECK(spec.has_value());
+    if (spec) {
+        CHECK(spec->target == L"C:\\AR\\approute-gui.exe");
+        CHECK(spec->arguments == L"--run Claude_pzs8sxrjxfjjc!Claude");
+        CHECK(spec->iconPath == L"C:\\Pkg\\app\\Claude.exe");
+    }
+    const auto noIcon = LaunchShortcutFor(r, L"C:\\AR\\approute-gui.exe", L"", &error);
+    CHECK(noIcon && noIcon->iconPath == L"C:\\AR\\approute-gui.exe");
+    CHECK(LaunchShortcutFileName(r) == L"Claude (AppRoute).lnk");
+    CHECK(LaunchShortcutFileName(r, L"Claude: чат") == L"Claude_ чат (AppRoute).lnk");
+}
+
+TEST(PackageLaunchRequest)
+{
+    Rule r;
+    r.app = L"Claude_pzs8sxrjxfjjc!Claude";
+    r.proxy = L"127.0.0.1:10808";
+    const LaunchRequest q = RequestForRule(r, L"\"Claude_pzs8sxrjxfjjc!Claude\" --flag \"a b\"");
+    CHECK(q.packageApp == r.app);
+    CHECK(q.packageArguments == L"--flag \"a b\"");
+    CHECK(q.proxy == r.proxy);
+    CHECK(RequestForRule(r, L"Claude_pzs8sxrjxfjjc!Claude").packageArguments.empty());
+
+    r.app = L"C:\\Apps\\app.exe";   // обычная программа — без пакета
+    CHECK(RequestForRule(r, L"\"C:\\Apps\\app.exe\"").packageApp.empty());
+
+    CHECK(ArgumentsAfterProgram(L"prog.exe  -x") == L"-x");
+    CHECK(ArgumentsAfterProgram(L"\"C:\\a b\\p.exe\"") == L"");
 }
 
 TEST(PackageWfpPlan)

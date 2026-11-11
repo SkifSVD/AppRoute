@@ -7,10 +7,11 @@
 // "Claude_pzs8sxrjxfjjc!Claude". Подходят только приложения полного доверия
 // (Windows.FullTrustApplication): обычные программы Win32, упакованные в MSIX.
 //
-// Внедрить hook-DLL при запуске пакета нельзя без обхода его защиты, поэтому такие правила
-// применяет только драйвер WFP (#18): программа определяется по образу, запущена она любым
-// способом. Путь к exe находится по пакету, установленному у пользователя, при каждом
-// применении правил.
+// Правило применяется двумя способами:
+// - драйвер WFP (#18): программа определяется по образу, запущена она любым способом; путь к
+//   exe находится по пакету, установленному у пользователя, при каждом применении правил;
+// - hook-DLL при запуске через AppRoute (#59): документированный механизм отладки пакетов
+//   Windows (IPackageDebugSettings) — см. LaunchWithRule.
 
 #include "core/Win.h"
 
@@ -60,6 +61,17 @@ std::vector<PackagedApp> EnumeratePackagedApps();
 // не полного доверия и т.п.
 std::optional<PackageExecutables> FindPackageExecutables(std::wstring_view app, const std::wstring& userSid,
                                                          std::wstring* error);
+
+// Установленная у текущего пользователя версия пакета приложения
+struct InstalledPackage {
+    std::wstring fullName;        // полное имя пакета (с версией и архитектурой)
+    std::wstring installedPath;   // папка пакета
+    PackageExecutables executables;
+};
+std::optional<InstalledPackage> FindInstalledPackage(std::wstring_view app, std::wstring* error);
+
+// Полное имя пакета процесса; пусто — процесс не из пакета
+std::wstring ProcessPackageFullName(HANDLE process);
 
 // Имя приложения из меню «Пуск» текущего пользователя; не найдено — сам AUMID
 std::wstring PackagedAppName(std::wstring_view app);
