@@ -44,9 +44,10 @@ jobs:
           Write-Host "AppRoute $version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      # build.ps1 сам найдёт cmake из установленной Visual Studio
+      # build.ps1 сам найдёт cmake из установленной Visual Studio. Поставка и установщик (#64) —
+      # без тега: тег выпуска ставит владелец (build.ps1 -Publish у себя)
       - name: Build and test
-        run: ./build.ps1 -Config Release -Test
+        run: ./build.ps1 -Config Release -Test -Publish -Installer -NoTag
 
       - uses: actions/upload-artifact@v4
         with:
@@ -54,6 +55,11 @@ jobs:
           path: |
             build/bin/Release/*.exe
             build/bin/Release/*.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: approute-${{ steps.version.outputs.version }}-setup
+          path: deploy/AppRoute-${{ steps.version.outputs.version }}-setup.exe
 
       # Драйвер и пакет для подписи Microsoft (#51, docs/driver-signing.md) — если на runner'е есть WDK.
       # Пакет не подписан: CAB подписывает EV-сертификатом владелец аккаунта Partner Center.

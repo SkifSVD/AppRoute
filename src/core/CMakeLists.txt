@@ -21,6 +21,7 @@ add_library(approute_core STATIC
     ConfigPolicy.h  ConfigPolicy.cpp
     ManagerPipe.h   ManagerPipe.cpp
     ServiceSetup.h  ServiceSetup.cpp
+    Setup.h         Setup.cpp
     Socks5.h        Socks5.cpp
     ProxyCredentials.h ProxyCredentials.cpp
     WfpPlan.h       WfpPlan.cpp

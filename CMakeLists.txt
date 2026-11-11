@@ -23,6 +23,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${APPROUTE_BIN_DIR})
 # x86-сборка (build.ps1 делает её второй): только то, что внедряется в 32-битные процессы
 option(APPROUTE_HOOK_ONLY "Собрать только hook-DLL и помощник внедрения" OFF)
 
+# Установщик (#64, build.ps1 -Installer — третьей сборкой): только core и approute-setup с файлами
+# из этой папки поставки
+set(APPROUTE_SETUP_PAYLOAD "" CACHE PATH "Папка поставки для установщика (пусто — установщик не собирается)")
+
 if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> /permissive- /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc> /Zc:__cplusplus)
 endif()
@@ -31,6 +35,10 @@ include(cmake/AppRouteVersion.cmake)
 
 add_subdirectory(third_party)
 add_subdirectory(src/core)
+if(APPROUTE_SETUP_PAYLOAD)
+    add_subdirectory(src/tools/setup)
+    return()
+endif()
 add_subdirectory(src/hook)
 add_subdirectory(src/tools/inject)
 if(APPROUTE_HOOK_ONLY)
