@@ -27,6 +27,7 @@
 #include "core/Shortcuts.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
+#include "core/Version.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -2095,6 +2096,8 @@ void ShowTrayMenu()
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"&Открыть AppRoute");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"&Выход");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, (std::wstring(L"Версия ") + AppRouteBuild()).c_str());
     SetMenuDefaultItem(menu, IDM_TRAY_OPEN, FALSE);
 
     POINT pt{};

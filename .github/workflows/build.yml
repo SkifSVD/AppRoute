@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']          # тег выпуска vX.Y.Z (#63) — его ставит build.ps1 -Publish
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +26,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          fetch-depth: 0      # версия считается по тегам выпусков (#63) — нужна вся история
+
+      # Версия — по тегам выпусков git, тем же правилом, что при сборке (cmake/GitVersion.cmake)
+      - name: Version
+        id: version
+        run: |
+          $lists = Get-Content CMakeLists.txt -Raw
+          if ($lists -notmatch 'project\(AppRoute\s+VERSION\s+(\d+\.\d+\.\d+)') { throw 'Не найдена версия в CMakeLists.txt' }
+          $cmake = (Get-Command cmake -ErrorAction SilentlyContinue)?.Source
+          if (-not $cmake) {
+              $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -products * -property installationPath
+              $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+          }
+          $version = (& $cmake "-DSOURCE_DIR=$PWD" "-DBASE_VERSION=$($Matches[1])" -P cmake/GitVersion.cmake | Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE) { throw 'Не удалось вычислить версию' }
+          Write-Host "AppRoute $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       # build.ps1 сам найдёт cmake из установленной Visual Studio
       - name: Build and test
@@ -32,7 +50,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: approute-x64
+          name: approute-${{ steps.version.outputs.version }}-x64
           path: |
             build/bin/Release/*.exe
             build/bin/Release/*.dll

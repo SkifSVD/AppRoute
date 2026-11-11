@@ -17,3 +17,4 @@ add_library(approute_hook SHARED
 )
 set_target_properties(approute_hook PROPERTIES OUTPUT_NAME ${APPROUTE_HOOK_NAME})
 target_link_libraries(approute_hook PRIVATE approute_core minhook mswsock)
+approute_version_resource(approute_hook "AppRoute — hook-DLL")

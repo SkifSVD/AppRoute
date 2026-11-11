@@ -21,6 +21,7 @@
 #include "core/Policy.h"
 #include "core/Process.h"
 #include "core/ProxyCredentials.h"
+#include "core/Version.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
 
@@ -1168,11 +1169,11 @@ void Install()
     }
     g_installed = true;
     if (g_proxy) {
-        Log(L"активен в %ls, прокси SOCKS5 %ls%ls, имена разрешает прокси: %ls", exe,
+        Log(L"AppRoute %ls активен в %ls, прокси SOCKS5 %ls%ls, имена разрешает прокси: %ls", AppRouteBuild(), exe,
             FormatProxyAddress(*g_proxy).c_str(), g_credential ? L" (с логином и паролем)" : L"",
             g_fakeDns ? L"да" : L"нет");
     } else {
-        Log(L"активен в %ls, интерфейс %ls, без интерфейса: %ls", exe, guid,
+        Log(L"AppRoute %ls активен в %ls, интерфейс %ls, без интерфейса: %ls", AppRouteBuild(), exe, guid,
             g_policy.onUnavailable == OnUnavailable::Default ? L"default" : L"block");
     }
 }

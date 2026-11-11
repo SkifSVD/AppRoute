@@ -7,6 +7,7 @@
 // продолжает работу. Правило передаётся через переменные окружения; дочерние процессы
 // получают его от hook-DLL (#8). 32-битные программы — через approute-inject32.exe (#7).
 
+#include "core/Version.h"
 #include "core/Config.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
@@ -157,6 +158,10 @@ void ApplyPackageApp(LaunchRequest& request)
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--version") {
+        Line(std::wstring(L"approute-run ") + AppRouteBuild());
+        return 0;
+    }
     auto options = ParseArgs(argc, argv);
     if (!options) {
         PrintUsage();

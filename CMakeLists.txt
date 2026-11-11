@@ -27,6 +27,8 @@ if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> /permissive- /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc> /Zc:__cplusplus)
 endif()
 
+include(cmake/AppRouteVersion.cmake)
+
 add_subdirectory(third_party)
 add_subdirectory(src/core)
 add_subdirectory(src/hook)

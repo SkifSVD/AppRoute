@@ -2,6 +2,7 @@
 //
 //   approute-dns --adapter <интерфейс> <имя> [<имя>...]
 
+#include "core/Version.h"
 #include "core/DnsResolver.h"
 #include "core/NetAdapters.h"
 #include "core/Util.h"
@@ -36,6 +37,10 @@ void Line(std::wstring_view text)
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--version") {
+        Line(std::wstring(L"approute-dns ") + AppRouteBuild());
+        return 0;
+    }
     if (argc < 4 || std::wstring_view(argv[1]) != L"--adapter") {
         Line(L"approute-dns --adapter IF ИМЯ [ИМЯ...]");
         return 1;

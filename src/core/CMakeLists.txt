@@ -15,6 +15,7 @@ add_library(approute_core STATIC
     PackagedApps.h  PackagedApps.cpp
     Shortcuts.h     Shortcuts.cpp
     Autostart.h     Autostart.cpp
+    Version.h       Version.cpp
     Com.h
     PrimarySwitch.h PrimarySwitch.cpp
     ConfigPolicy.h  ConfigPolicy.cpp
@@ -30,6 +31,9 @@ add_library(approute_core STATIC
 )
 
 target_include_directories(approute_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# AppRouteVersion.h — создаётся при сборке (cmake/AppRouteVersion.cmake, #63)
+target_include_directories(approute_core PRIVATE ${APPROUTE_GENERATED_DIR})
+add_dependencies(approute_core approute_version)
 
 target_compile_definitions(approute_core PUBLIC
     UNICODE _UNICODE
