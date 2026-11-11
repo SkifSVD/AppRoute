@@ -55,7 +55,7 @@ void PrintUsage()
     Line(L"  IF             ifIndex, GUID или имя интерфейса (см. approute-routes list);");
     Line(L"                 без --adapter правило берётся из конфига (см. approute-config)");
     Line(L"  --proxy        вместо интерфейса — SOCKS5-прокси, например 127.0.0.1:10808: TCP идёт через");
-    Line(L"                 него, имена разрешает прокси, UDP блокируется (локальные адреса — напрямую)");
+    Line(L"                 него, имена разрешает прокси, UDP — через UDP ASSOCIATE (локальные адреса — напрямую)");
     Line(L"  --config       файл конфига вместо %APPDATA%\\AppRoute\\config.json");
     Line(L"  --log          журнал hook-DLL (все процессы пишут в один файл)");
     Line(L"  --on-unavailable  если у интерфейса нет адреса (VPN отключён): block — блокировать");
@@ -192,8 +192,8 @@ int wmain(int argc, wchar_t** argv)
                              options->proxy));
             return 1;
         }
-        Line(std::format(L"AppRoute: TCP-трафик «{}»{} идёт через SOCKS5-прокси {}; имена разрешает прокси, UDP "
-                         L"блокируется.",
+        Line(std::format(L"AppRoute: трафик «{}»{} (TCP и UDP) идёт через SOCKS5-прокси {}; имена разрешает "
+                         L"прокси.",
                          options->commandLine, options->children ? L" и его дочерних процессов" : L"",
                          FormatProxyAddress(*address)));
         LaunchRequest request = rule ? RequestForRule(*rule, options->commandLine) : LaunchRequest{};

@@ -91,16 +91,21 @@ BEGIN
 END
 
 // Адрес SOCKS5-прокси (#17)
-IDD_PROXY DIALOGEX 0, 0, 260, 96
+IDD_PROXY DIALOGEX 0, 0, 260, 150
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "SOCKS5-прокси"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "Адрес и порт прокси, например 127.0.0.1:10808 — локальный прокси клиента Xray/V2Ray. Нужен IP-адрес; прокси — без пароля.", IDC_PROXY_HINT, 7, 7, 246, 27
+    LTEXT           "Адрес и порт прокси, например 127.0.0.1:10808 — локальный прокси клиента Xray/V2Ray. Нужен IP-адрес.", IDC_PROXY_HINT, 7, 7, 246, 27
     EDITTEXT        IDC_PROXY_ADDRESS, 7, 38, 246, 13, ES_AUTOHSCROLL
     LTEXT           "", IDC_PROXY_STATE, 7, 56, 246, 9, SS_ENDELLIPSIS | SS_NOPREFIX
-    DEFPUSHBUTTON   "OK", IDOK, 146, 75, 50, 14
-    PUSHBUTTON      "Отмена", IDCANCEL, 203, 75, 50, 14
+    LTEXT           "Логин:", -1, 7, 74, 58, 9
+    EDITTEXT        IDC_PROXY_USER, 68, 72, 185, 13, ES_AUTOHSCROLL
+    LTEXT           "Пароль:", -1, 7, 91, 58, 9
+    EDITTEXT        IDC_PROXY_PASSWORD, 68, 89, 185, 13, ES_AUTOHSCROLL | ES_PASSWORD
+    LTEXT           "Только если прокси требует вход. Логин и пароль хранятся в диспетчере учётных данных Windows, а не в конфиге; пустой логин — без входа.", IDC_PROXY_AUTH_NOTE, 7, 106, 246, 18
+    DEFPUSHBUTTON   "OK", IDOK, 146, 129, 50, 14
+    PUSHBUTTON      "Отмена", IDCANCEL, 203, 129, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO

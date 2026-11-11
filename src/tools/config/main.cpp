@@ -5,10 +5,12 @@
 //                   [--dns adapter|system] [--ipv6 follow|block|default] [--no-children]
 //   approute-config [--config FILE] remove PROGRAM
 //   approute-config packages
+//   approute-config proxy-auth ADDR USER | ADDR --remove
 
 #include "core/Config.h"
 #include "core/NetAdapters.h"
 #include "core/PackagedApps.h"
+#include "core/ProxyCredentials.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
 
@@ -51,6 +53,10 @@ void PrintUsage()
     Line(L"  approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [параметры]");
     Line(L"  approute-config [--config FILE] remove PROGRAM");
     Line(L"  approute-config packages                          приложения из Microsoft Store и MSIX");
+    Line(L"  approute-config proxy-auth ADDR USER              логин и пароль SOCKS5-прокси (пароль");
+    Line(L"                                                    спрашивается; хранится в диспетчере");
+    Line(L"                                                    учётных данных Windows, не в конфиге)");
+    Line(L"  approute-config proxy-auth ADDR --remove          удалить логин и пароль прокси");
     Line(L"");
     Line(L"  PROGRAM            путь к программе, только имя файла (подходит в любом каталоге) или");
     Line(L"                     приложение из пакета: Семейство!Id, см. packages. Такое правило");
@@ -102,6 +108,12 @@ int Show(const Config& config)
         Line(IsPackageApp(rule.app) ? std::format(L"{} ({}, из пакета)", rule.app, PackagedAppName(rule.app))
                                     : rule.app);
         Line(std::format(L"    → {}", rule.proxy.empty() ? adapterLabel(rule.adapter) : L"SOCKS5-прокси " + rule.proxy));
+        if (!rule.proxy.empty()) {
+            const auto address = ParseProxyAddress(rule.proxy);
+            const auto credential = address ? ReadProxyCredential(*address) : std::nullopt;
+            Line(credential ? std::format(L"    логин {}, пароль задан", credential->user)
+                            : std::wstring(L"    без логина и пароля"));
+        }
         Line(std::format(L"    onUnavailable={} dns={} ipv6={} includeChildren={}", Name(rule.onUnavailable),
                          Name(rule.dns), Name(rule.ipv6), rule.includeChildren ? L"true" : L"false"));
     }
@@ -214,6 +226,81 @@ int Packages()
     return 0;
 }
 
+// Пароль с консоли без отображения; если ввод перенаправлен — первая строка stdin
+std::optional<std::wstring> ReadPassword()
+{
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(in, &mode)) {
+        Out(L"Пароль: ");
+        SetConsoleMode(in, (mode & ~ENABLE_ECHO_INPUT) | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        std::wstring buffer(1024, L'\0');
+        DWORD read = 0;
+        const BOOL ok = ReadConsoleW(in, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr);
+        SetConsoleMode(in, mode);
+        Line(L"");
+        if (!ok) {
+            return std::nullopt;
+        }
+        buffer.resize(read);
+        while (!buffer.empty() && (buffer.back() == L'\n' || buffer.back() == L'\r')) {
+            buffer.pop_back();
+        }
+        return buffer;
+    }
+    std::string bytes;
+    char c = 0;
+    DWORD n = 0;
+    while (ReadFile(in, &c, 1, &n, nullptr) && n == 1 && c != '\n') {
+        bytes.push_back(c);
+    }
+    if (!bytes.empty() && bytes.back() == '\r') {
+        bytes.pop_back();
+    }
+    auto text = FromUtf8(bytes);
+    SecureZeroMemory(bytes.data(), bytes.size());
+    return text;
+}
+
+int ProxyAuth(const std::vector<std::wstring>& args)
+{
+    if (args.size() != 2) {
+        PrintUsage();
+        return 1;
+    }
+    const auto address = ParseProxyAddress(args[0]);
+    if (!address) {
+        Line(std::format(L"Ошибка: адрес прокси «{}» — нужен IP-адрес и порт, например 127.0.0.1:10808", args[0]));
+        return 1;
+    }
+    if (args[1] == L"--remove") {
+        Line(DeleteProxyCredential(*address)
+                 ? std::format(L"Логин и пароль прокси {} удалены", FormatProxyAddress(*address))
+                 : std::format(L"Для прокси {} логин и пароль не заданы", FormatProxyAddress(*address)));
+        return 0;
+    }
+    ProxyCredential credential;
+    credential.user = args[1];
+    auto password = ReadPassword();
+    if (!password) {
+        Line(L"Ошибка: пароль не прочитан");
+        return 1;
+    }
+    credential.password = std::move(*password);
+    std::wstring error;
+    if (!SaveProxyCredential(*address, credential, &error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    Line(std::format(L"Логин и пароль прокси {} сохранены в диспетчере учётных данных Windows ({})",
+                     FormatProxyAddress(*address), ProxyCredentialTarget(*address)));
+    const Socks5Auth check = CheckProxy(*address, &credential, 2000);
+    if (check != Socks5Auth::NoAnswer) {
+        Line(std::format(L"Проверка: {}", Socks5AuthText(check)));
+    }
+    return 0;
+}
+
 int Remove(Config& config, const std::wstring& path, const std::vector<std::wstring>& args)
 {
     if (args.size() != 1) {
@@ -259,6 +346,9 @@ int wmain(int argc, wchar_t** argv)
     }
     if (command == L"packages") {
         return Packages();
+    }
+    if (command == L"proxy-auth") {
+        return ProxyAuth(args);
     }
 
     std::wstring error;

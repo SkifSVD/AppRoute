@@ -1,5 +1,6 @@
 #include "core/Socks5.h"
 
+#include "core/ProxyCredentials.h"
 #include "core/Util.h"
 
 #include <ws2tcpip.h>
@@ -119,9 +120,121 @@ bool ProxyResponds(const SOCKADDR_INET& address, DWORD timeoutMs)
     return ok;
 }
 
-std::string Socks5Greeting()
+std::string Socks5Greeting(bool offerPassword)
 {
-    return std::string("\x05\x01\x00", 3);
+    return offerPassword ? std::string("\x05\x02\x00\x02", 4) : std::string("\x05\x01\x00", 3);
+}
+
+std::optional<std::string> Socks5PasswordRequest(const ProxyCredential& credential)
+{
+    std::string user = ToUtf8(credential.user);
+    std::string password = ToUtf8(credential.password);
+    std::optional<std::string> out;
+    if (!user.empty() && user.size() <= 255 && !password.empty() && password.size() <= 255) {
+        out.emplace();
+        out->reserve(3 + user.size() + password.size());
+        out->push_back(0x01);
+        out->push_back(static_cast<char>(user.size()));
+        out->append(user);
+        out->push_back(static_cast<char>(password.size()));
+        out->append(password);
+    }
+    SecureZeroMemory(password.data(), password.size());
+    return out;
+}
+
+Socks5Auth Socks5Negotiate(const Socks5Send& send, const Socks5Recv& recv, const ProxyCredential* credential)
+{
+    char reply[2] = {};
+    if (!send(Socks5Greeting(credential != nullptr)) || !recv(reply, 2)) {
+        return Socks5Auth::NoAnswer;
+    }
+    if (reply[0] != 0x05) {
+        return Socks5Auth::Unsupported;
+    }
+    const auto method = static_cast<uint8_t>(reply[1]);
+    if (method == 0x00) {
+        return Socks5Auth::Ok;
+    }
+    if (method != 0x02) {
+        return credential ? Socks5Auth::Unsupported : Socks5Auth::NeedsPassword;
+    }
+    if (!credential) {
+        return Socks5Auth::NeedsPassword;   // не предлагали, но прокси выбрал — нестандартно
+    }
+    auto request = Socks5PasswordRequest(*credential);
+    if (!request) {
+        return Socks5Auth::WrongPassword;
+    }
+    const bool sent = send(*request);
+    SecureZeroMemory(request->data(), request->size());
+    if (!sent || !recv(reply, 2)) {
+        return Socks5Auth::NoAnswer;
+    }
+    return reply[1] == 0x00 ? Socks5Auth::Ok : Socks5Auth::WrongPassword;
+}
+
+const wchar_t* Socks5AuthText(Socks5Auth result)
+{
+    switch (result) {
+    case Socks5Auth::Ok: return L"прокси принял соединение";
+    case Socks5Auth::NoAnswer: return L"нет ответа на приветствие SOCKS5";
+    case Socks5Auth::NeedsPassword: return L"прокси требует логин и пароль — задайте их для этого прокси";
+    case Socks5Auth::WrongPassword: return L"прокси отклонил логин и пароль";
+    case Socks5Auth::Unsupported: return L"прокси не принял способ входа или это не SOCKS5";
+    }
+    return L"";
+}
+
+Socks5Auth CheckProxy(const SOCKADDR_INET& address, const ProxyCredential* credential, DWORD timeoutMs)
+{
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        return Socks5Auth::NoAnswer;
+    }
+    Socks5Auth result = Socks5Auth::NoAnswer;
+    const SOCKET s = socket(address.si_family, SOCK_STREAM, IPPROTO_TCP);
+    if (s != INVALID_SOCKET) {
+        u_long nonBlocking = 1;
+        ioctlsocket(s, FIONBIO, &nonBlocking);
+        const int len = address.si_family == AF_INET6 ? static_cast<int>(sizeof(sockaddr_in6))
+                                                      : static_cast<int>(sizeof(sockaddr_in));
+        bool connected = connect(s, reinterpret_cast<const sockaddr*>(&address), len) == 0;
+        if (!connected && WSAGetLastError() == WSAEWOULDBLOCK) {
+            fd_set writable;
+            FD_ZERO(&writable);
+            FD_SET(s, &writable);
+            fd_set failed;
+            FD_ZERO(&failed);
+            FD_SET(s, &failed);
+            timeval tv{static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+            connected = select(0, nullptr, &writable, &failed, &tv) > 0 && FD_ISSET(s, &writable);
+        }
+        if (connected) {
+            nonBlocking = 0;
+            ioctlsocket(s, FIONBIO, &nonBlocking);
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+            const auto sendAll = [&](std::string_view data) {
+                return send(s, data.data(), static_cast<int>(data.size()), 0) == static_cast<int>(data.size());
+            };
+            const auto recvExact = [&](char* out, size_t size) {
+                size_t got = 0;
+                while (got < size) {
+                    const int n = recv(s, out + got, static_cast<int>(size - got), 0);
+                    if (n <= 0) {
+                        return false;
+                    }
+                    got += static_cast<size_t>(n);
+                }
+                return true;
+            };
+            result = Socks5Negotiate(sendAll, recvExact, credential);
+        }
+        closesocket(s);
+    }
+    WSACleanup();
+    return result;
 }
 
 bool Socks5NoAuthAccepted(std::string_view reply)
@@ -167,6 +280,71 @@ std::optional<size_t> Socks5ReplyLength(std::string_view head)
     case 0x03: return 4 + 1 + static_cast<uint8_t>(head[4]) + 2;
     default: return std::nullopt;
     }
+}
+
+std::string Socks5UdpAssociateRequest()
+{
+    return std::string("\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+}
+
+std::optional<SOCKADDR_INET> Socks5ReplyAddress(std::string_view reply)
+{
+    const auto total = Socks5ReplyLength(reply);
+    if (!total || reply.size() < *total) {
+        return std::nullopt;
+    }
+    SOCKADDR_INET a{};
+    const auto* p = reinterpret_cast<const unsigned char*>(reply.data());
+    switch (p[3]) {
+    case 0x01:
+        a.Ipv4.sin_family = AF_INET;
+        std::memcpy(&a.Ipv4.sin_addr, p + 4, 4);
+        std::memcpy(&a.Ipv4.sin_port, p + 8, 2);
+        return a;
+    case 0x04:
+        a.Ipv6.sin6_family = AF_INET6;
+        std::memcpy(&a.Ipv6.sin6_addr, p + 4, 16);
+        std::memcpy(&a.Ipv6.sin6_port, p + 20, 2);
+        return a;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::string Socks5UdpHeader(const SOCKADDR_INET& target)
+{
+    std::string out = Socks5ConnectRequest(target);
+    out[1] = 0x00;   // RSV RSV FRAG вместо VER CMD RSV
+    out[0] = 0x00;
+    return out;
+}
+
+std::optional<std::string> Socks5UdpHeader(std::string_view host, USHORT port)
+{
+    auto out = Socks5ConnectRequest(host, port);
+    if (out) {
+        (*out)[0] = 0x00;
+        (*out)[1] = 0x00;
+    }
+    return out;
+}
+
+std::optional<size_t> Socks5UdpHeaderLength(std::string_view datagram)
+{
+    if (datagram.size() < 5 || datagram[0] != 0 || datagram[1] != 0 || datagram[2] != 0) {
+        return std::nullopt;
+    }
+    size_t length = 0;
+    switch (static_cast<uint8_t>(datagram[3])) {
+    case 0x01: length = 4 + 4 + 2; break;
+    case 0x04: length = 4 + 16 + 2; break;
+    case 0x03: length = 4 + 1 + static_cast<uint8_t>(datagram[4]) + 2; break;
+    default: return std::nullopt;
+    }
+    if (datagram.size() < length) {
+        return std::nullopt;
+    }
+    return length;
 }
 
 const wchar_t* Socks5ReplyText(uint8_t code)
