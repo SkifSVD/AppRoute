@@ -27,6 +27,7 @@
 #include "core/Shortcuts.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
+#include "core/Setup.h"
 #include "core/Version.h"
 
 #include <commctrl.h>
@@ -54,6 +55,8 @@ constexpr UINT kMsgDpiChanged = WM_APP + 1;
 constexpr UINT kMsgTray = WM_APP + 3;
 constexpr UINT kTrayId = 1;
 const UINT kMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+// Установщик (#64) просит выйти перед обновлением — как «Выход» в меню значка
+const UINT kMsgExitRequest = RegisterWindowMessageW(kGuiExitMessage);
 
 enum Column { ColProgram, ColAdapter, ColState, ColPolicy, ColPath, ColCount };
 
@@ -2474,6 +2477,10 @@ INT_PTR CALLBACK MainDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return TRUE;
     }
+    if (msg == kMsgExitRequest && msg != 0) {
+        DestroyWindow(dlg);
+        return TRUE;
+    }
     if (msg == kMsgTaskbarCreated && msg != 0) {   // перезапуск Проводника — значок заново
         g.trayAdded = false;
         AddTrayIcon();
@@ -2633,7 +2640,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     // Одно окно на сеанс: оно живёт в трее, повторный запуск показывает его
     const HANDLE single = CreateMutexW(nullptr, FALSE, L"Local\\AppRoute.Gui");
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (HWND existing = FindWindowW(L"#32770", L"AppRoute — правила программ")) {
+        if (HWND existing = FindWindowW(L"#32770", kGuiWindowTitle)) {
             ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
             SetForegroundWindow(existing);
         }

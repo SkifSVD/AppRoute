@@ -1,6 +1,6 @@
 #pragma once
 
-// Версия AppRoute (#63): из project(AppRoute VERSION ...) в CMakeLists.txt, при сборке к ней
+// Версия AppRoute (#63): по тегам выпусков git (cmake/GitVersion.cmake), при сборке к ней
 // добавляется коммит git ("0.1.0+1a2b3c4d", с "-dirty" при незакоммиченных изменениях).
 
 namespace approute {

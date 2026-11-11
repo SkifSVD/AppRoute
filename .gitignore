@@ -20,3 +20,4 @@ CMakeUserPresets.json
 *.lib
 *.exp
 /build32/
+/build-setup/

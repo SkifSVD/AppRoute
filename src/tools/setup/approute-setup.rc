@@ -1,0 +1,4 @@
+#pragma code_page(65001)
+
+// Значок — как у окна правил; файлы программы — в payload.rc (создаётся при сборке)
+1 ICON "../../../resources/approute.ico"

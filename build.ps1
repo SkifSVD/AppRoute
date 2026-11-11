@@ -28,6 +28,10 @@
 .PARAMETER Zip
     После -Publish упаковать поставку в deploy\AppRoute-<версия>-win-x64.zip.
 
+.PARAMETER Installer
+    После -Publish собрать установщик deploy\AppRoute-<версия>-setup.exe (#64): один exe с файлами
+    поставки внутри — установка, обновление поверх, откат и удаление.
+
 .PARAMETER NoTag
     Не ставить тег выпуска после -Publish.
 
@@ -37,7 +41,7 @@
 .EXAMPLE
     ./build.ps1 -Test
 .EXAMPLE
-    ./build.ps1 -Publish -Zip
+    ./build.ps1 -Publish -Zip -Installer
 .EXAMPLE
     ./build.ps1 -Publish -Version 0.3.1 -NoTag
 #>
@@ -48,13 +52,14 @@ param(
     [string]$Version = '',
     [switch]$Publish,
     [switch]$Zip,
+    [switch]$Installer,
     [switch]$NoTag,
     [switch]$NoTagPush
 )
 $ErrorActionPreference = 'Stop'
 
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+$') { throw "-Version: нужен формат X.Y.Z, а не «$Version»" }
-if ($Zip -and -not $Publish) { throw '-Zip — только вместе с -Publish' }
+if (($Zip -or $Installer) -and -not $Publish) { throw '-Zip и -Installer — только вместе с -Publish' }
 if ($Publish -and $Config -ne 'Release') { throw '-Publish — только для -Config Release' }
 
 $cmake = (Get-Command cmake -ErrorAction SilentlyContinue)?.Source
@@ -153,6 +158,21 @@ if ($Zip) {
     if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
     Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zipPath
     Write-Host "  ZIP: $zipPath" -ForegroundColor Green
+}
+
+# Установщик (#64) — третьей сборкой: core и approute-setup с файлами поставки внутри
+if ($Installer) {
+    $buildSetup = Join-Path $PSScriptRoot 'build-setup'
+    & $cmake -S $PSScriptRoot -B $buildSetup -A x64 "-DAPPROUTE_SETUP_PAYLOAD=$package" $override
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    & $cmake --build $buildSetup --config Release --target approute-setup
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $setupBuilt = Join-Path $buildSetup 'bin\Release\approute-setup.exe'
+    $actual = (Get-Item -LiteralPath $setupBuilt).VersionInfo.FileVersion
+    if ($actual -ne $releaseVersion) { throw "approute-setup.exe собран с версией $actual, а выпуск — $releaseVersion" }
+    $setupPath = Join-Path $deploy "AppRoute-$releaseVersion-setup.exe"
+    Copy-Item -LiteralPath $setupBuilt -Destination $setupPath -Force
+    Write-Host "  Установщик: $setupPath" -ForegroundColor Green
 }
 
 # Тег выпуска: без него версия следующих сборок замрёт на этом номере. Невыполнимое условие —
