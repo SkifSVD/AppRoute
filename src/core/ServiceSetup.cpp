@@ -373,6 +373,77 @@ bool UninstallAppRouteService(std::wstring* error)
     return true;
 }
 
+bool InstallWfpDriver(const std::wstring& sysPath, std::wstring* error)
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
+    if (!scm.h) {
+        return Fail(error, L"нет доступа к диспетчеру служб (нужны права администратора)");
+    }
+    ScHandle existing(OpenServiceW(scm.h, kDriverServiceName, SERVICE_ALL_ACCESS));
+    if (existing.h && !StopService(existing.h, 10000, error)) {
+        return false;
+    }
+    const std::wstring dir = InstallDirectory();
+    if (dir.size() < 4) {
+        return Fail(error, L"не найдена папка Program Files", 0);
+    }
+    CreateDirectoryW(dir.c_str(), nullptr);
+    if (!OwnedByAdmins(dir)) {
+        return Fail(error, dir + L" принадлежит не администраторам — установка прервана", 0);
+    }
+    const std::wstring target = dir + L"\\approute-wfp.sys";
+    if (!EqualsIgnoreCase(sysPath, target) && !CopyBinary(sysPath, target, error)) {
+        return false;
+    }
+    SC_HANDLE service = existing.h;
+    ScHandle created;
+    if (service) {
+        if (!ChangeServiceConfigW(service, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+                                  target.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr,
+                                  L"AppRoute — драйвер WFP")) {
+            return Fail(error, L"не удалось обновить службу драйвера");
+        }
+    } else {
+        created.h = CreateServiceW(scm.h, kDriverServiceName, L"AppRoute — драйвер WFP", SERVICE_ALL_ACCESS,
+                                   SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, target.c_str(),
+                                   nullptr, nullptr, nullptr, nullptr, nullptr);
+        if (!created.h) {
+            return Fail(error, L"не удалось создать службу драйвера");
+        }
+        service = created.h;
+    }
+    if (!StartServiceW(service, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+        const DWORD code = GetLastError();
+        std::wstring why = L"драйвер не загрузился: " + Win32ErrorMessage(code);
+        if (code == ERROR_INVALID_IMAGE_HASH) {
+            why += L" — подпись не принята: тестовая подпись работает только в тестовом режиме (bcdedit /set testsigning on)";
+        }
+        return Fail(error, why, 0);
+    }
+    return true;
+}
+
+bool UninstallWfpDriver(std::wstring* error)
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
+    if (!scm.h) {
+        return Fail(error, L"нет доступа к диспетчеру служб (нужны права администратора)");
+    }
+    ScHandle service(OpenServiceW(scm.h, kDriverServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE));
+    if (service.h) {
+        if (!StopService(service.h, 10000, error)) {
+            return false;
+        }
+        if (!DeleteService(service.h) && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            return Fail(error, L"не удалось удалить службу драйвера");
+        }
+    } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST) {
+        return Fail(error, L"нет доступа к службе драйвера");
+    }
+    RemoveFile(InstallDirectory() + L"\\approute-wfp.sys");
+    return true;
+}
+
 HANDLE OpenProtectedLog(const std::wstring& dir, const std::wstring& file)
 {
     // SYSTEM и администраторы — полный доступ, пользователи — чтение

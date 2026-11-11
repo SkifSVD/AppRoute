@@ -56,6 +56,14 @@ bool InstallAppRouteService(const std::wstring& sourceDir, const std::wstring& c
 // и ярлыка. Занятые файлы удаляются при перезагрузке.
 bool UninstallAppRouteService(std::wstring* error);
 
+// Драйвер approute-wfp.sys (#18): копируется в InstallDirectory() (туда пишут только
+// администраторы — иначе подмена файла дала бы код в ядре), служба драйвера с ручным запуском,
+// запуск. Нужны права администратора; тестовая подпись загружается только в тестовом режиме.
+inline constexpr wchar_t kDriverServiceName[] = L"approute-wfp";
+bool InstallWfpDriver(const std::wstring& sysPath, std::wstring* error);
+// Остановка и удаление службы драйвера и файла.
+bool UninstallWfpDriver(std::wstring* error);
+
 // Журнал службы: dir создаётся с доступом SYSTEM/администраторы (пользователи — чтение).
 // Существующая папка с другим владельцем (её мог заранее создать кто угодно) отодвигается в
 // сторону; файл-ссылка не открывается. nullptr — открыть безопасно не удалось.

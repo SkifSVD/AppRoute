@@ -30,6 +30,8 @@
 #include "core/ConflictGuard.h"
 #include "core/RouteManager.h"
 #include "core/ServiceSetup.h"
+#include "core/WfpEngine.h"
+#include "core/WfpPlan.h"
 #include "core/Routes.h"
 #include "core/Util.h"
 
@@ -121,6 +123,7 @@ struct Options {
     std::optional<ULONG> metric;
     std::wstring config;                // файл правил; пусто — по умолчанию
     std::wstring clientSid;             // serve: пользователь, которому доступен канал
+    std::wstring sys;                   // install-driver: файл драйвера
 };
 
 void PrintUsage()
@@ -139,6 +142,10 @@ void PrintUsage()
     Line(L"  approute-routes install-service [--config FILE]");
     Line(L"      установить менеджер маршрутов службой Windows: работает постоянно, в том числе после");
     Line(L"      перезагрузки; файлы копируются в %ProgramFiles%\\AppRoute (нужны права администратора)");
+    Line(L"  approute-routes install-driver --sys FILE | uninstall-driver");
+    Line(L"      драйвер approute-wfp.sys (#18, проверка): копируется в %ProgramFiles%\\AppRoute");
+    Line(L"  approute-routes wfp [--config FILE] [--client-sid SID]");
+    Line(L"      правила для программ, запущенных любым способом (драйвер WFP); Ctrl+C — снять");
     Line(L"  approute-routes uninstall-service");
     Line(L"      остановить службу (изменения откатываются) и удалить её");
     Line();
@@ -184,6 +191,10 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
             auto v = value();
             if (!v) return std::nullopt;
             o.clientSid = *v;
+        } else if (arg == L"--sys") {
+            auto v = value();
+            if (!v) return std::nullopt;
+            o.sys = *v;
         } else if (arg == L"--config") {
             auto v = value();
             if (!v) return std::nullopt;
@@ -852,6 +863,120 @@ int CmdInstallService(const Options& options)
     return 0;
 }
 
+int CmdInstallDriver(const Options& options)
+{
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: нужны права администратора.");
+        return 2;
+    }
+    if (options.sys.empty()) {
+        Line(L"Ошибка: укажите --sys путь\\к\\approute-wfp.sys");
+        return 1;
+    }
+    wchar_t full[MAX_PATH * 2] = {};
+    GetFullPathNameW(options.sys.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
+    std::wstring error;
+    if (!InstallWfpDriver(full, &error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    Line(std::format(L"Драйвер approute-wfp загружен ({}\\approute-wfp.sys).", InstallDirectory()));
+    return 0;
+}
+
+int CmdUninstallDriver()
+{
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: нужны права администратора.");
+        return 2;
+    }
+    std::wstring error;
+    if (!UninstallWfpDriver(&error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    Line(L"Драйвер approute-wfp выгружен и удалён.");
+    return 0;
+}
+
+// Правила через драйвер WFP (#18): фильтры живут, пока работает команда (динамическая сессия)
+int CmdWfp(const Options& options)
+{
+    if (!IsProcessElevated()) {
+        Line(L"Ошибка: нужны права администратора.");
+        return 2;
+    }
+    if (!IsWfpDriverRunning()) {
+        Line(L"Внимание: драйвер approute-wfp не загружен — программы с правилами останутся без сети");
+        Line(L"(callout без драйвера WFP считает блокировкой). Загрузить: approute-routes install-driver --sys FILE");
+    }
+    const std::wstring configPath = ConfigPath(options);
+    const std::wstring sid = options.clientSid.empty() ? CurrentUserSid() : options.clientSid;
+    WfpEngine engine;
+    std::wstring error;
+    if (!engine.Open(&error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    std::wstring lastText;
+    auto apply = [&] {
+        std::wstring err;
+        const auto config = LoadConfig(configPath, &err);
+        if (!config) {
+            Line(std::format(L"[{}] ⚠ конфиг не прочитан, фильтры не меняются: {}", Now(), err));
+            return;
+        }
+        const WfpPlan plan = WfpPlanFromConfig(*config, EnumerateAdapters(), sid);
+        std::vector<std::wstring> notes = plan.notes;
+        if (!engine.Apply(plan, &notes, &err)) {
+            Line(std::format(L"[{}] ошибка: {}", Now(), err));
+            return;
+        }
+        std::wstring text;
+        for (const WfpAppFilter& f : plan.filters) {
+            const bool v4 = f.target.flags & APPROUTE_TARGET_HAS_V4;
+            const bool v6 = f.target.flags & APPROUTE_TARGET_HAS_V6;
+            text += std::format(L"  {} → [{}]{}{}\n", f.appPath, InterfaceName(NET_LUID{f.target.luid}),
+                                v4 ? L" IPv4" : L"", v6 ? L" IPv6" : L"");
+        }
+        for (const std::wstring& n : notes) {
+            text += L"  ⚠ " + n + L"\n";
+        }
+        if (text != lastText) {
+            Line(std::format(L"[{}] фильтры WFP ({}), исключений: {}:", Now(), engine.FilterCount(), plan.exemptions.size()));
+            Out(text);
+            lastText = text;
+        }
+    };
+
+    Line(std::format(L"Правила из {} применяются ко всем запускам программ пользователя {}.", configPath, sid));
+    Line(L"Ctrl+C — снять фильтры и выйти.");
+    ChangeNotifier notifier;
+    FileChangeWatcher configWatch(configPath);
+    apply();
+    std::vector<HANDLE> handles = {g_stop, notifier.Event()};
+    if (configWatch.Event()) {
+        handles.push_back(configWatch.Event());
+    }
+    for (;;) {
+        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        if (w == WAIT_OBJECT_0 || WaitForSingleObject(g_stop, 500) == WAIT_OBJECT_0) {
+            break;
+        }
+        ResetEvent(notifier.Event());
+        configWatch.Rearm();
+        apply();
+    }
+    engine.Close();
+    Line(std::format(L"[{}] фильтры WFP сняты.", Now()));
+    SetEvent(g_done);
+    return 0;
+}
+
 int CmdUninstallService()
 {
     OpenInstallLog();
@@ -896,6 +1021,15 @@ int wmain(int argc, wchar_t** argv)
         }
         if (options->command == L"uninstall-service") {
             return CmdUninstallService();
+        }
+        if (options->command == L"install-driver") {
+            return CmdInstallDriver(*options);
+        }
+        if (options->command == L"uninstall-driver") {
+            return CmdUninstallDriver();
+        }
+        if (options->command == L"wfp") {
+            return CmdWfp(*options);
         }
         if (options->command == L"plan") {
             const auto policy = BuildPolicy(*options);
