@@ -32,7 +32,8 @@ enum class DnsMode { Adapter, System };
 enum class Ipv6Mode { Follow, Block, Default };
 
 struct Rule {
-    std::wstring app;        // полный путь (допускаются %ПЕРЕМЕННЫЕ%) или только имя файла
+    std::wstring app;        // полный путь (допускаются %ПЕРЕМЕННЫЕ%), только имя файла или
+                             // приложение из пакета "Семейство!Id" (#45, только через драйвер WFP)
     std::wstring adapter;    // GUID интерфейса, "{...}" в верхнем регистре; пусто у правила «прокси»
     std::wstring proxy;      // SOCKS5-прокси (#17) "127.0.0.1:10808" вместо интерфейса; пусто — интерфейс
     OnUnavailable onUnavailable = OnUnavailable::Block;

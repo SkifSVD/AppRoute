@@ -3,7 +3,8 @@
     администратора:  powershell -ExecutionPolicy Bypass -File C:\AppRouteTest\Test-Driver.ps1
 
     1. Загружает драйвер (approute-routes install-driver).
-    2. Создаёт правило: curl.exe и копия PowerShell (для проверки UDP) → вторая сетевая карта ВМ.
+    2. Создаёт правило: curl.exe и копия PowerShell (для проверки UDP) → вторая сетевая карта ВМ;
+       если есть App Installer — и winget как приложение из пакета MSIX (#45, правило по AUMID).
     3. Включает правила (approute-routes wfp) и запускает программы обычным способом, без AppRoute:
        TCP (curl) и UDP (сокет на «любом» адресе) должны выйти с адреса второй карты.
     4. Снимает правила (завершает approute-routes wfp) и проверяет, что всё вернулось.
@@ -41,8 +42,14 @@ $udpExe = Join-Path $dir 'ps-udp.exe'
 Copy-Item "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" $udpExe -Force
 $config = Join-Path $dir 'test-config.json'
 $rule = { param($app) @{ app = $app; target = @{ type = 'adapter'; id = $guid }; onUnavailable = 'block'; dns = 'adapter'; ipv6 = 'follow'; includeChildren = $true } }
-@{ version = 1; primary = 'auto'; rules = @((& $rule "$env:SystemRoot\System32\curl.exe"), (& $rule $udpExe)) } |
-    ConvertTo-Json -Depth 5 | Set-Content $config -Encoding UTF8
+# Приложение из пакета MSIX (#45): winget из App Installer — правило по AUMID, путь к exe служба
+# находит по пакету пользователя
+$pkgApp = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe!winget'
+$hasPkg = [bool](Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) -and
+    [bool](Get-Command winget -ErrorAction SilentlyContinue)
+$rules = @((& $rule "$env:SystemRoot\System32\curl.exe"), (& $rule $udpExe))
+if ($hasPkg) { $rules += & $rule $pkgApp }
+@{ version = 1; primary = 'auto'; rules = $rules } | ConvertTo-Json -Depth 5 | Set-Content $config -Encoding UTF8
 
 function TcpLocalIp { (& "$env:SystemRoot\System32\curl.exe" -s -o NUL -m 15 -w '%{local_ip}' http://example.com/ 2>$null) }
 function UdpLocalIp {
@@ -84,6 +91,26 @@ function CheckRedirected([string]$how) {
     Check 'UDP (привязка к «любому» адресу) — адрес второй карты' ($udpBound -eq $second.IPAddress) "локальный адрес: $udpBound"
     $other = (Invoke-WebRequest http://example.com/ -UseBasicParsing -TimeoutSec 15).StatusCode
     Check 'другие программы работают как обычно' ($other -eq 200) "PowerShell: $other"
+    if ($hasPkg) {
+        $pkg = @(PackageLocalIps)
+        Check 'приложение из пакета (winget) — с адреса второй карты' ($pkg.Count -gt 0 -and @($pkg | Where-Object { $_ -ne $second.IPAddress }).Count -eq 0) "локальные адреса: $($pkg -join ', ')"
+    } else {
+        Check 'приложение из пакета (winget)' $true 'пропущено: App Installer не установлен'
+    }
+}
+
+# Локальные адреса TCP-соединений winget, пока он обновляет источник
+function PackageLocalIps {
+    $p = Start-Process winget -ArgumentList 'source', 'update', '--disable-interactivity' -PassThru -WindowStyle Hidden
+    $ips = @{}
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+        Get-NetTCPConnection -OwningProcess $p.Id -RemotePort 443, 80 -ErrorAction SilentlyContinue |
+            Where-Object LocalAddress -NotIn '0.0.0.0', '::' | ForEach-Object { $ips[$_.LocalAddress] = 1 }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+    $ips.Keys
 }
 
 if ($Service) {

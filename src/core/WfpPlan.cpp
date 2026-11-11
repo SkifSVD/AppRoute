@@ -147,7 +147,8 @@ bool SameWfpPlan(const WfpPlan& a, const WfpPlan& b)
     return true;
 }
 
-WfpPlan WfpPlanFromConfig(const Config& config, const std::vector<NetAdapter>& adapters, const std::wstring& userSid)
+WfpPlan WfpPlanFromConfig(const Config& config, const std::vector<NetAdapter>& adapters, const std::wstring& userSid,
+                          const WfpPackageResolver& resolvePackage)
 {
     WfpPlan plan;
     plan.userSid = userSid;
@@ -155,6 +156,27 @@ WfpPlan WfpPlanFromConfig(const Config& config, const std::vector<NetAdapter>& a
     for (const Rule& rule : config.rules) {
         if (!rule.proxy.empty()) {
             plan.notes.push_back(rule.app + L": правило «прокси» действует только для программ, запущенных через AppRoute");
+            continue;
+        }
+        if (IsPackageApp(rule.app)) {
+            std::wstring error = L"приложение из пакета не найдено";
+            const auto exes = resolvePackage ? resolvePackage(rule.app, &error) : std::nullopt;
+            if (!exes) {
+                plan.notes.push_back(rule.app + L": " + error);
+                continue;
+            }
+            std::vector<std::wstring> paths = {exes->main};
+            if (rule.includeChildren) {
+                paths.insert(paths.end(), exes->helpers.begin(), exes->helpers.end());
+            }
+            for (const std::wstring& path : paths) {
+                WfpAppFilter f;
+                f.app = rule.app;
+                f.appPath = path;
+                f.adapter = rule.adapter;
+                f.target = MakeWfpTarget(FindAdapter(adapters, rule.adapter), rule);
+                plan.filters.push_back(std::move(f));
+            }
             continue;
         }
         const std::wstring path = ExpandPath(rule.app);
