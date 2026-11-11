@@ -149,6 +149,13 @@ bool ParseRule(const json::Value& v, const std::wstring& path, Rule& rule, std::
         }
         rule.includeChildren = children->AsBool();
     }
+    if (const auto* autostart = v.Find("autostart")) {
+        if (!autostart->IsBool()) {
+            error = path + L".autostart: ожидалось true или false";
+            return false;
+        }
+        rule.autostart = autostart->AsBool();
+    }
     return true;
 }
 
@@ -361,6 +368,9 @@ std::string SerializeConfig(const Config& config)
         r.emplace_back("dns", kNames.dns[static_cast<int>(rule.dns)]);
         r.emplace_back("ipv6", kNames.ipv6[static_cast<int>(rule.ipv6)]);
         r.emplace_back("includeChildren", rule.includeChildren);
+        if (rule.autostart) {
+            r.emplace_back("autostart", true);
+        }
         rules.emplace_back(std::move(r));
     }
 
@@ -494,6 +504,9 @@ std::optional<std::wstring> ValidateRule(const Rule& rule)
     }
     if (rule.app.find_first_of(L"\"<>|?*") != std::wstring::npos) {
         return L"Путь к программе содержит недопустимые символы.";
+    }
+    if (rule.autostart && !HasPathSeparator(rule.app) && !IsPackageApp(rule.app)) {
+        return L"Для запуска при входе в Windows нужен полный путь к программе, а не только имя файла.";
     }
     if (!rule.proxy.empty()) {
         if (!ParseProxyAddress(rule.proxy)) {

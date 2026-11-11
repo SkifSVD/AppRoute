@@ -14,6 +14,7 @@ add_library(approute_core STATIC
     InstalledApps.h InstalledApps.cpp
     PackagedApps.h  PackagedApps.cpp
     Shortcuts.h     Shortcuts.cpp
+    Autostart.h     Autostart.cpp
     Com.h
     PrimarySwitch.h PrimarySwitch.cpp
     ConfigPolicy.h  ConfigPolicy.cpp

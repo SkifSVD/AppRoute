@@ -2,13 +2,16 @@
 //
 //   approute-config [--config FILE] path | show | check
 //   approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [--on-unavailable block|default]
-//                   [--dns adapter|system] [--ipv6 follow|block|default] [--no-children]
+//                   [--dns adapter|system] [--ipv6 follow|block|default] [--no-children] [--autostart]
 //   approute-config [--config FILE] remove PROGRAM
+//   approute-config [--config FILE] autostart PROGRAM on|off
 //   approute-config packages
 //   approute-config proxy-auth ADDR USER | ADDR --remove
 
+#include "core/Autostart.h"
 #include "core/Config.h"
 #include "core/NetAdapters.h"
+#include "core/Process.h"
 #include "core/PackagedApps.h"
 #include "core/ProxyCredentials.h"
 #include "core/Socks5.h"
@@ -52,6 +55,7 @@ void PrintUsage()
     Line(L"  approute-config [--config FILE] check             проверить конфиг");
     Line(L"  approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [параметры]");
     Line(L"  approute-config [--config FILE] remove PROGRAM");
+    Line(L"  approute-config [--config FILE] autostart PROGRAM on|off  запускать при входе в Windows");
     Line(L"  approute-config packages                          приложения из Microsoft Store и MSIX");
     Line(L"  approute-config proxy-auth ADDR USER              логин и пароль SOCKS5-прокси (пароль");
     Line(L"                                                    спрашивается; хранится в диспетчере");
@@ -59,15 +63,18 @@ void PrintUsage()
     Line(L"  approute-config proxy-auth ADDR --remove          удалить логин и пароль прокси");
     Line(L"");
     Line(L"  PROGRAM            путь к программе, только имя файла (подходит в любом каталоге) или");
-    Line(L"                     приложение из пакета: Семейство!Id, см. packages. Такое правило");
-    Line(L"                     действует только через драйвер WFP");
+    Line(L"                     приложение из пакета: Семейство!Id, см. packages");
     Line(L"  --adapter IF       ifIndex, GUID или имя интерфейса; в конфиг пишется GUID");
     Line(L"  --proxy ADDR       вместо интерфейса — SOCKS5-прокси, например 127.0.0.1:10808");
     Line(L"  --on-unavailable   block (по умолчанию) | default — если интерфейс отключён");
     Line(L"  --dns              adapter (по умолчанию) | system");
     Line(L"  --ipv6             follow (по умолчанию) | block | default");
     Line(L"  --no-children      не применять правило к дочерним процессам");
+    Line(L"  --autostart        запускать программу при входе в Windows через AppRoute (нужен полный");
+    Line(L"                     путь; AppRoute добавляет одну запись автозагрузки для себя)");
 }
+
+int SyncAutostartEntry(const Config& config, const std::wstring& path);
 
 const wchar_t* Name(OnUnavailable v) { return v == OnUnavailable::Block ? L"block" : L"default"; }
 const wchar_t* Name(DnsMode v) { return v == DnsMode::Adapter ? L"adapter" : L"system"; }
@@ -114,8 +121,12 @@ int Show(const Config& config)
             Line(credential ? std::format(L"    логин {}, пароль задан", credential->user)
                             : std::wstring(L"    без логина и пароля"));
         }
-        Line(std::format(L"    onUnavailable={} dns={} ipv6={} includeChildren={}", Name(rule.onUnavailable),
-                         Name(rule.dns), Name(rule.ipv6), rule.includeChildren ? L"true" : L"false"));
+        Line(std::format(L"    onUnavailable={} dns={} ipv6={} includeChildren={}{}", Name(rule.onUnavailable),
+                         Name(rule.dns), Name(rule.ipv6), rule.includeChildren ? L"true" : L"false",
+                         rule.autostart ? L" autostart=true" : L""));
+    }
+    if (const auto entry = ReadAutostartEntry()) {
+        Line(L"Запуск при входе в Windows: " + *entry);
     }
     return 0;
 }
@@ -155,6 +166,8 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
             else { Line(L"Ошибка: --ipv6 follow|block|default"); return 1; }
         } else if (arg == L"--no-children") {
             rule.includeChildren = false;
+        } else if (arg == L"--autostart") {
+            rule.autostart = true;
         } else {
             Line(std::format(L"Ошибка: неизвестный параметр {}", arg));
             return 1;
@@ -206,7 +219,64 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
         return 1;
     }
     Line(std::format(L"{}: {} → {}", replaced ? L"Правило обновлено" : L"Правило добавлено", rule.app, target));
+    return SyncAutostartEntry(config, path);
+}
+
+// Запись автозапуска AppRoute (#60) — по флажкам правил; окно approute-gui.exe — рядом
+int SyncAutostartEntry(const Config& config, const std::wstring& path)
+{
+    const std::wstring gui = ModuleDirectory(reinterpret_cast<const void*>(&SyncAutostartEntry)) + L"approute-gui.exe";
+    if (AutostartWanted(config) && GetFileAttributesW(gui.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        Line(std::format(L"Ошибка: для запуска при входе нужен {}", gui));
+        return 1;
+    }
+    std::wstring error;
+    if (!SyncAutostart(config, gui, path, &error)) {
+        Line(L"Ошибка: " + error);
+        return 1;
+    }
     return 0;
+}
+
+int Autostart(Config& config, const std::wstring& path, const std::vector<std::wstring>& args)
+{
+    if (args.size() != 2 || (args[1] != L"on" && args[1] != L"off")) {
+        PrintUsage();
+        return 1;
+    }
+    const std::wstring app = RuleApp(args[0]);
+    Rule* rule = nullptr;
+    for (auto& r : config.rules) {
+        if (EqualsIgnoreCase(r.app, app)) {
+            rule = &r;
+        }
+    }
+    if (!rule) {
+        Line(std::format(L"Ошибка: правила для «{}» нет", app));
+        return 1;
+    }
+    Rule changed = *rule;
+    changed.autostart = args[1] == L"on";
+    if (const auto problem = ValidateRule(changed)) {
+        Line(L"Ошибка: " + *problem);
+        return 1;
+    }
+    *rule = changed;
+    std::wstring error;
+    if (!SaveConfig(path, config, &error)) {
+        Line(std::format(L"Ошибка записи: {}", error));
+        return 1;
+    }
+    Line(std::format(L"{}: {}", changed.autostart ? L"Запуск при входе в Windows включён" : L"Запуск при входе выключен",
+                     changed.app));
+    if (changed.autostart) {
+        for (const auto& own : FindOwnAutostart(changed)) {
+            Line(std::format(L"Внимание: у программы есть своя автозагрузка {} — она запустит программу мимо "
+                             L"AppRoute; отключите её в «Параметры → Приложения → Автозагрузка».",
+                             own));
+        }
+    }
+    return SyncAutostartEntry(config, path);
 }
 
 int Packages()
@@ -222,7 +292,8 @@ int Packages()
         Line(std::format(L"    {}", a.executable));
     }
     Line(L"");
-    Line(L"Правило: approute-config add Семейство!Id --adapter IF (действует через драйвер WFP).");
+    Line(L"Правило: approute-config add Семейство!Id --adapter IF | --proxy ADDR (запуск через AppRoute;");
+    Line(L"с драйвером WFP — при любом запуске).");
     return 0;
 }
 
@@ -369,7 +440,11 @@ int wmain(int argc, wchar_t** argv)
         return Add(*config, path, args);
     }
     if (command == L"remove") {
-        return Remove(*config, path, args);
+        const int rc = Remove(*config, path, args);
+        return rc ? rc : SyncAutostartEntry(*config, path);
+    }
+    if (command == L"autostart") {
+        return Autostart(*config, path, args);
     }
     PrintUsage();
     return 1;

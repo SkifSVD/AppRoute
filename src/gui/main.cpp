@@ -8,9 +8,11 @@
 //
 //   approute-gui [--config FILE]
 //   approute-gui [--config FILE] --run PROGRAM [-- ARGS...]   — запуск по правилу без окна (ярлыки, #13)
+//   approute-gui [--config FILE] --autostart                  — программы с флажком «при входе» (#60)
 
 #include "resource.h"
 
+#include "core/Autostart.h"
 #include "core/Config.h"
 #include "core/ConfigPolicy.h"
 #include "core/ManagerPipe.h"
@@ -538,9 +540,10 @@ void FillList(std::optional<size_t> select)
         const int row = ListView_InsertItem(g.list, &it);
         UpdateRow(row, r);
         SetCell(row, ColPolicy, OnUnavailableText(r.onUnavailable));
-        SetCell(row, ColPath, IsPackageApp(r.app) ? L"из пакета: " + r.app
-                              : IsPath(r.app)      ? r.app
-                                                   : std::wstring(L"(любой каталог)"));
+        SetCell(row, ColPath, (r.autostart ? L"[при входе] " : L"") +
+                                  (IsPackageApp(r.app) ? L"из пакета: " + r.app
+                                   : IsPath(r.app)     ? r.app
+                                                       : std::wstring(L"(любой каталог)")));
         if (select && *select == i) {
             ListView_SetItemState(g.list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_EnsureVisible(g.list, row, FALSE);
@@ -573,6 +576,17 @@ std::wstring ConfigSummary()
     return std::format(L"Правил: {} · {}", g.config.rules.size(), g.configPath);
 }
 
+std::wstring ThisExe();
+
+// Запись автозапуска AppRoute — по флажкам правил (#60); путь окна мог смениться
+void SyncAutostartEntry()
+{
+    std::wstring error;
+    if (!SyncAutostart(g.config, ThisExe(), g.configPath, &error)) {
+        SetStatus(error);
+    }
+}
+
 // Перечитать конфиг с диска (его могли изменить approute-config или другой экземпляр)
 void Reload(bool showErrors)
 {
@@ -583,6 +597,7 @@ void Reload(bool showErrors)
         g.config = std::move(*loaded);
         g.readOnly = false;
         SetStatus(ConfigSummary());
+        SyncAutostartEntry();
     } else {
         g.config = {};
         g.readOnly = true;
@@ -608,6 +623,9 @@ bool Save(const std::wstring& done, std::optional<size_t> select)
     }
     FillList(select);
     SetStatus(done + L" · " + ConfigSummary());
+    if (!SyncAutostart(g.config, ThisExe(), g.configPath, &error)) {
+        Message(g.main, error, MB_ICONWARNING);
+    }
     return true;
 }
 
@@ -717,6 +735,7 @@ void InitRuleDialog(HWND dlg, RuleDialog& d)
     FillCombo(dlg, IDC_IPV6, {L"Как при недоступном интерфейсе", L"Блокировать", L"Маршрутом по умолчанию"},
               d.rule.ipv6 == Ipv6Mode::Block ? 1 : d.rule.ipv6 == Ipv6Mode::Default ? 2 : 0);
     CheckDlgButton(dlg, IDC_CHILDREN, d.rule.includeChildren ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_AUTOSTART, d.rule.autostart ? BST_CHECKED : BST_UNCHECKED);
     UpdateAdapterInfo(dlg, d);
 }
 
@@ -760,6 +779,7 @@ bool AcceptRule(HWND dlg, RuleDialog& d)
     const int v6 = ComboSelection(dlg, IDC_IPV6);
     r.ipv6 = v6 == 1 ? Ipv6Mode::Block : v6 == 2 ? Ipv6Mode::Default : Ipv6Mode::Follow;
     r.includeChildren = IsDlgButtonChecked(dlg, IDC_CHILDREN) == BST_CHECKED;
+    r.autostart = IsDlgButtonChecked(dlg, IDC_AUTOSTART) == BST_CHECKED;
 
     if (const auto error = ValidateRule(r)) {
         Message(dlg, *error, MB_ICONWARNING);
@@ -775,6 +795,22 @@ bool AcceptRule(HWND dlg, RuleDialog& d)
     if (IsPath(r.app) && GetFileAttributesW(Expand(r.app).c_str()) == INVALID_FILE_ATTRIBUTES &&
         Message(dlg, L"Файл программы не найден. Всё равно сохранить правило?", MB_ICONQUESTION | MB_YESNO) != IDYES) {
         return false;
+    }
+    // Своя автозагрузка программы запустит её ещё раз — мимо AppRoute (#60). Чужие записи не трогаем.
+    if (r.autostart) {
+        const auto own = FindOwnAutostart(r);
+        if (!own.empty()) {
+            std::wstring places;
+            for (const auto& p : own) {
+                places += L"\n• " + p;
+            }
+            Message(dlg,
+                    std::format(L"У «{}» есть своя автозагрузка:{}\n\nПри входе в Windows программа запустится "
+                                L"и так — мимо AppRoute, без правила. Отключите её в «Параметры → Приложения → "
+                                L"Автозагрузка» или в настройках самой программы.",
+                                AppTitle(r.app), places),
+                    MB_ICONINFORMATION);
+        }
     }
     d.rule = std::move(r);
     return true;
@@ -2448,6 +2484,7 @@ struct Arguments {
     std::wstring config;
     std::optional<std::wstring> run;       // --run PROGRAM
     std::wstring programArguments;         // после «--», уже в кавычках
+    bool autostart = false;                // --autostart: запуск отмеченных программ при входе (#60)
 };
 
 Arguments ParseArguments()
@@ -2461,6 +2498,8 @@ Arguments ParseArguments()
             a.config = argv[++i];
         } else if (arg == L"--run" && i + 1 < argc) {
             a.run = argv[++i];
+        } else if (arg == L"--autostart") {
+            a.autostart = true;
         } else if (arg == L"--") {
             for (++i; i < argc; ++i) {
                 a.programArguments += L" " + QuoteArgument(argv[i]);
@@ -2517,6 +2556,61 @@ int RunFromShortcut(const Arguments& args)
     return 0;
 }
 
+// Запуск отмеченных программ при входе в Windows (#60) — без окна, как ярлыки. Интерфейс или
+// прокси правила (VPN) может подняться позже входа: ждём его не дольше kAutostartWaitMs, затем
+// запускаем всё равно — пока интерфейса нет, правило соблюдает hook-DLL (по умолчанию блокирует).
+constexpr ULONGLONG kAutostartWaitMs = 3 * 60 * 1000;
+
+int RunAutostart(const Arguments& args)
+{
+    std::wstring error;
+    const auto config = LoadConfig(args.config, &error);
+    if (!config) {
+        Message(nullptr, L"AppRoute не запустил программы при входе — не удалось прочитать правила:\n\n" + error,
+                MB_ICONERROR);
+        return 1;
+    }
+    std::vector<const Rule*> pending;
+    for (const Rule& rule : config->rules) {
+        if (rule.autostart) {
+            pending.push_back(&rule);
+        }
+    }
+    const ULONGLONG deadline = GetTickCount64() + kAutostartWaitMs;
+    std::wstring problems;
+    while (!pending.empty()) {
+        const bool late = GetTickCount64() >= deadline;
+        for (auto it = pending.begin(); it != pending.end();) {
+            const Rule& rule = **it;
+            if (!late && !RuleTargetReady(rule)) {
+                ++it;
+                continue;
+            }
+            LaunchRequest request = RequestForRule(rule, CommandLineForApp(rule.app));
+            request.inheritStdHandles = false;
+            const LaunchResult result = LaunchWithRule(request);
+            if (!result.Ok()) {
+                problems += std::format(L"• {}: {}\n", AppTitle(rule.app), result.message);
+            } else {
+                if (result.process) {
+                    CloseHandle(result.process);
+                }
+                if (!result.warning.empty()) {
+                    problems += std::format(L"• {}: {}\n", AppTitle(rule.app), result.warning);
+                }
+            }
+            it = pending.erase(it);
+        }
+        if (!pending.empty()) {
+            Sleep(2000);
+        }
+    }
+    if (!problems.empty()) {
+        Message(nullptr, L"AppRoute — запуск программ при входе в Windows:\n\n" + problems, MB_ICONWARNING);
+    }
+    return 0;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
@@ -2529,6 +2623,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     RestorePackageDebugging();   // режим отладки пакета, оставшийся после прерванного запуска (#59)
     if (args.run) {
         return RunFromShortcut(args);
+    }
+    if (args.autostart) {
+        return RunAutostart(args);
     }
     // Одно окно на сеанс: оно живёт в трее, повторный запуск показывает его
     const HANDLE single = CreateMutexW(nullptr, FALSE, L"Local\\AppRoute.Gui");

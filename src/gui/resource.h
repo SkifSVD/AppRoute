@@ -46,6 +46,7 @@
 #define IDC_LABEL_ONUNAVAIL 1111
 #define IDC_LABEL_DNS       1112
 #define IDC_LABEL_IPV6      1113
+#define IDC_AUTOSTART       1114
 
 // Мастер добавления программы (#37)
 #define IDC_WAPP_SEARCH     1201
