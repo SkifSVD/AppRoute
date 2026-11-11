@@ -25,13 +25,15 @@ struct ShortcutSpec {
 std::wstring QuoteArgument(std::wstring_view arg);
 
 // Ярлык для правила. configPath пустой или путь по умолчанию — без --config. nullopt и ошибка,
-// если в правиле только имя файла: для ярлыка нужен полный путь программы.
+// если в правиле только имя файла: для ярлыка нужен полный путь программы. Приложение из
+// пакета (#59): --run "Семейство!Id", значок — exe пакета (packageExe; пусто — значок AppRoute).
 std::optional<ShortcutSpec> LaunchShortcutFor(const Rule& rule, const std::wstring& launcherExe,
-                                              const std::wstring& configPath, std::wstring* error);
+                                              const std::wstring& configPath, std::wstring* error,
+                                              const std::wstring& packageExe = {});
 
-// "Telegram (AppRoute).lnk": имя программы без расширения, недопустимые в именах файлов
-// символы заменены.
-std::wstring LaunchShortcutFileName(const Rule& rule);
+// "Telegram (AppRoute).lnk": имя программы без расширения (или displayName, если задано —
+// для приложений из пакетов), недопустимые в именах файлов символы заменены.
+std::wstring LaunchShortcutFileName(const Rule& rule, std::wstring_view displayName = {});
 
 // Записать ярлык (перезаписывает существующий файл).
 bool SaveShortcut(const std::wstring& lnkPath, const ShortcutSpec& spec, std::wstring* error);

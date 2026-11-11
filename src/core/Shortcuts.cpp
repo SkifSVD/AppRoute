@@ -65,14 +65,19 @@ std::wstring QuoteArgument(std::wstring_view arg)
 }
 
 std::optional<ShortcutSpec> LaunchShortcutFor(const Rule& rule, const std::wstring& launcherExe,
-                                              const std::wstring& configPath, std::wstring* error)
+                                              const std::wstring& configPath, std::wstring* error,
+                                              const std::wstring& packageExe)
 {
     if (IsPackageApp(rule.app)) {
-        if (error) {
-            *error = L"Приложение из пакета запускайте как обычно — из меню «Пуск»: правило для него "
-                     L"действует через драйвер WFP, ярлык AppRoute не нужен.";
+        ShortcutSpec s;
+        s.target = launcherExe;
+        if (!configPath.empty() && !EqualsIgnoreCase(configPath, DefaultConfigPath())) {
+            s.arguments = L"--config " + QuoteArgument(configPath) + L" ";
         }
-        return std::nullopt;
+        s.arguments += L"--run " + QuoteArgument(rule.app);
+        s.iconPath = packageExe.empty() ? launcherExe : packageExe;
+        s.description = std::format(L"{} через AppRoute", PackageAppIdOf(rule.app));
+        return s;
     }
     if (rule.app.find_first_of(L"\\/") == std::wstring::npos) {
         if (error) {
@@ -95,10 +100,13 @@ std::optional<ShortcutSpec> LaunchShortcutFor(const Rule& rule, const std::wstri
     return s;
 }
 
-std::wstring LaunchShortcutFileName(const Rule& rule)
+std::wstring LaunchShortcutFileName(const Rule& rule, std::wstring_view displayName)
 {
-    std::wstring name(FileNamePart(rule.app));
-    if (name.size() > 4 && EqualsIgnoreCase(std::wstring_view(name).substr(name.size() - 4), L".exe")) {
+    std::wstring name(!displayName.empty()      ? displayName
+                      : IsPackageApp(rule.app) ? PackageAppIdOf(rule.app)
+                                               : FileNamePart(rule.app));
+    if (displayName.empty() && name.size() > 4 &&
+        EqualsIgnoreCase(std::wstring_view(name).substr(name.size() - 4), L".exe")) {
         name.resize(name.size() - 4);
     }
     for (auto& c : name) {

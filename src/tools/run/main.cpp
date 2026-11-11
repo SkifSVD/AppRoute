@@ -10,6 +10,7 @@
 #include "core/Config.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
+#include "core/PackagedApps.h"
 #include "core/Socks5.h"
 #include "core/Policy.h"
 #include "core/Process.h"
@@ -63,6 +64,9 @@ void PrintUsage()
     Line(L"  --ipv6         IPv6 без IPv6-адреса у интерфейса: follow (как --on-unavailable), block, default");
     Line(L"  --no-children  не применять правило к дочерним процессам");
     Line(L"  --no-wait      не ждать завершения программы");
+    Line(L"");
+    Line(L"  PROGRAM может быть приложением из Microsoft Store/MSIX — его AUMID «Семейство!Id»");
+    Line(L"  (см. approute-config packages)");
 }
 
 struct Options {
@@ -139,6 +143,16 @@ std::optional<Options> ParseArgs(int argc, wchar_t** argv)
     return o;
 }
 
+// Приложение из пакета: вместо программы — его AUMID "Семейство!Id" (#59)
+void ApplyPackageApp(LaunchRequest& request)
+{
+    const std::wstring program = ResolveProgramPath(request.commandLine);
+    if (IsPackageApp(program)) {
+        request.packageApp = program;
+        request.packageArguments = ArgumentsAfterProgram(request.commandLine);
+    }
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -203,10 +217,14 @@ int wmain(int argc, wchar_t** argv)
         request.logPath = options->log;
         request.includeChildren = options->children;
         request.policy = policy;
+        ApplyPackageApp(request);
         auto launched = LaunchWithRule(request);
         if (!launched.Ok()) {
             Line(launched.message);
             return 1;
+        }
+        if (!launched.warning.empty()) {
+            Line(L"Внимание: " + launched.warning);
         }
         DWORD exitCode = 0;
         if (options->wait) {
@@ -255,10 +273,14 @@ int wmain(int argc, wchar_t** argv)
     request.logPath = options->log;
     request.includeChildren = options->children;
     request.policy = policy;
+    ApplyPackageApp(request);
     auto launched = LaunchWithRule(request);
     if (!launched.Ok()) {
         Line(launched.message);
         return 1;
+    }
+    if (!launched.warning.empty()) {
+        Line(L"Внимание: " + launched.warning);
     }
     if (launched.is32Bit) {
         Line(L"(32-битная программа)");
