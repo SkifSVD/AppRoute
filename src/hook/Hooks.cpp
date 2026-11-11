@@ -7,14 +7,16 @@
 //
 // Правило «прокси» (#17): TCP-соединения вместо привязки к интерфейсу идут через SOCKS5-прокси
 // (соединение с прокси и рукопожатие — синхронно, внутри connect/ConnectEx), имена разрешает
-// прокси (служебные адреса из DnsHooks). UDP через прокси пока не передаётся и блокируется, чтобы
-// не уходить мимо него; локальные адреса (loopback, подсети интерфейсов) — напрямую.
+// прокси (служебные адреса из DnsHooks). UDP — через UDP ASSOCIATE (#46, UdpRelay): датаграммы
+// идут на внутренний сокет реле, адрес отправителя в ответах подменяется исходным. Локальные
+// адреса (loopback, подсети интерфейсов) — напрямую.
 
 #include "Hooks.h"
 #include "AdapterResolver.h"
 #include "DnsHooks.h"
 #include "Log.h"
 #include "ProcessHooks.h"
+#include "UdpRelay.h"
 
 #include "core/Policy.h"
 #include "core/Process.h"
@@ -25,6 +27,7 @@
 #include <mswsock.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -59,6 +62,15 @@ decltype(&::listen) Real_listen = &::listen;
 decltype(&::closesocket) Real_closesocket = &::closesocket;
 decltype(&::getpeername) Real_getpeername = &::getpeername;
 decltype(&::setsockopt) Real_setsockopt = &::setsockopt;
+// UDP через прокси (#46): приём и завершение асинхронных операций — подмена адреса отправителя
+decltype(&::recvfrom) Real_recvfrom = &::recvfrom;
+decltype(&::WSARecvFrom) Real_WSARecvFrom = &::WSARecvFrom;
+decltype(&::WSAGetOverlappedResult) Real_WSAGetOverlappedResult = &::WSAGetOverlappedResult;
+decltype(&::GetOverlappedResult) Real_GetOverlappedResult = &::GetOverlappedResult;
+decltype(&::GetOverlappedResultEx) Real_GetOverlappedResultEx = &::GetOverlappedResultEx;
+decltype(&::GetQueuedCompletionStatus) Real_GetQueuedCompletionStatus = &::GetQueuedCompletionStatus;
+decltype(&::GetQueuedCompletionStatusEx) Real_GetQueuedCompletionStatusEx = &::GetQueuedCompletionStatusEx;
+LPFN_WSARECVMSG Real_WSARecvMsg = nullptr;
 
 SRWLOCK g_connectExLock = SRWLOCK_INIT;
 LPFN_CONNECTEX Real_ConnectEx = nullptr;
@@ -297,19 +309,36 @@ enum class ProxyOutcome {
     Failed,      // ошибка выставлена
 };
 
-// UDP в правиле «прокси»: локальные адреса — напрямую, остальное блокируется
-bool ProxyAllowsDatagram(const SOCKADDR_INET& dest, const wchar_t* api)
+enum class DatagramRoute {
+    Direct,   // как есть: локальный адрес, не UDP
+    Relay,    // через реле прокси: адрес внутреннего сокета в shim
+    Failed,   // ошибка выставлена
+};
+
+// UDP в правиле «прокси» (#46): локальные адреса — напрямую, остальное — через UDP ASSOCIATE
+DatagramRoute RouteDatagram(SOCKET s, const sockaddr* to, int toLen, const wchar_t* api, const sockaddr*& shim,
+                            int& shimLen)
 {
-    const SOCKADDR_INET target = Unmap(dest);
-    if (!FakeIpPool::InRange(target) && g_resolver.IsLocalDestination(target)) {
-        return true;
+    SOCKADDR_INET d{};
+    int family = 0;
+    int type = 0;
+    if (!to || !ToInet(to, toLen, d) || !SocketInfo(s, family, type) || type != SOCK_DGRAM) {
+        return DatagramRoute::Direct;
     }
-    static LONG logged = 0;
-    if (InterlockedIncrement(&logged) <= 20) {
-        Log(L"%ls → %ls: UDP через прокси не передаётся — заблокировано", api, Describe(target).c_str());
+    const SOCKADDR_INET target = Unmap(d);
+    const auto host = g_fakeDns ? g_fakeIps.Lookup(target) : std::nullopt;
+    if (!host) {
+        if (FakeIpPool::InRange(target)) {
+            Log(L"%ls → %ls: служебный адрес без имени — заблокировано", api, Describe(target).c_str());
+            WSASetLastError(WSAEHOSTUNREACH);
+            return DatagramRoute::Failed;
+        }
+        if (g_resolver.IsLocalDestination(target)) {
+            return DatagramRoute::Direct;
+        }
     }
-    WSASetLastError(WSAENETUNREACH);
-    return false;
+    shim = UdpRelayRoute(s, family, to, toLen, target, host, shimLen);
+    return shim ? DatagramRoute::Relay : DatagramRoute::Failed;
 }
 
 ProxyOutcome ConnectViaProxy(SOCKET s, const sockaddr* dest, int destLen, const wchar_t* api)
@@ -322,7 +351,23 @@ ProxyOutcome ConnectViaProxy(SOCKET s, const sockaddr* dest, int destLen, const 
     }
     const SOCKADDR_INET target = Unmap(d);
     if (type != SOCK_STREAM) {
-        return ProxyAllowsDatagram(d, api) ? ProxyOutcome::Direct : ProxyOutcome::Failed;
+        // Подключённый UDP-сокет — к внутреннему сокету реле; getpeername вернёт исходный адрес
+        const sockaddr* shim = nullptr;
+        int shimLen = 0;
+        switch (RouteDatagram(s, dest, destLen, api, shim, shimLen)) {
+        case DatagramRoute::Direct: return ProxyOutcome::Direct;
+        case DatagramRoute::Failed: return ProxyOutcome::Failed;
+        case DatagramRoute::Relay: break;
+        }
+        if (Real_connect(s, shim, shimLen) != 0) {
+            return ProxyOutcome::Failed;
+        }
+        sockaddr_storage original{};
+        std::memcpy(&original, dest, std::min<size_t>(static_cast<size_t>(destLen), sizeof(original)));
+        AcquireSRWLockExclusive(&g_proxiedLock);
+        g_proxied[s] = original;
+        ReleaseSRWLockExclusive(&g_proxiedLock);
+        return ProxyOutcome::Connected;
     }
     const auto host = g_fakeDns ? g_fakeIps.Lookup(target) : std::nullopt;
     if (!host && (FakeIpPool::InRange(target) || g_resolver.IsLocalDestination(target))) {
@@ -561,11 +606,13 @@ BOOL PASCAL Hook_ConnectEx(SOCKET s, const sockaddr* name, int namelen, PVOID se
 int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags, const sockaddr* to, int tolen)
 {
     if (g_proxy) {
-        SOCKADDR_INET d{};
-        if (to && ToInet(to, tolen, d) && !ProxyAllowsDatagram(d, L"sendto")) {
-            return SOCKET_ERROR;
+        const sockaddr* shim = nullptr;
+        int shimLen = 0;
+        switch (RouteDatagram(s, to, tolen, L"sendto", shim, shimLen)) {
+        case DatagramRoute::Direct: return Real_sendto(s, buf, len, flags, to, tolen);
+        case DatagramRoute::Relay: return Real_sendto(s, buf, len, flags, shim, shimLen);
+        case DatagramRoute::Failed: return SOCKET_ERROR;
         }
-        return Real_sendto(s, buf, len, flags, to, tolen);
     }
     if (to && !PrepareSocket(s, to, tolen, L"sendto")) {
         return SOCKET_ERROR;
@@ -578,9 +625,13 @@ int WSAAPI Hook_WSASendTo(SOCKET s, LPWSABUF buffers, DWORD bufferCount, LPDWORD
                           LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
 {
     if (g_proxy) {
-        SOCKADDR_INET d{};
-        if (to && ToInet(to, tolen, d) && !ProxyAllowsDatagram(d, L"WSASendTo")) {
-            return SOCKET_ERROR;
+        const sockaddr* shim = nullptr;
+        int shimLen = 0;
+        switch (RouteDatagram(s, to, tolen, L"WSASendTo", shim, shimLen)) {
+        case DatagramRoute::Direct: break;
+        case DatagramRoute::Relay:
+            return Real_WSASendTo(s, buffers, bufferCount, bytesSent, flags, shim, shimLen, overlapped, completion);
+        case DatagramRoute::Failed: return SOCKET_ERROR;
         }
         return Real_WSASendTo(s, buffers, bufferCount, bytesSent, flags, to, tolen, overlapped, completion);
     }
@@ -594,9 +645,25 @@ int WSAAPI Hook_WSASendMsg(SOCKET s, LPWSAMSG msg, DWORD flags, LPDWORD bytesSen
                            LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
 {
     if (g_proxy) {
-        SOCKADDR_INET d{};
-        if (msg && msg->name && ToInet(msg->name, msg->namelen, d) && !ProxyAllowsDatagram(d, L"WSASendMsg")) {
-            return SOCKET_ERROR;
+        const sockaddr* shim = nullptr;
+        int shimLen = 0;
+        switch (msg && msg->name ? RouteDatagram(s, msg->name, msg->namelen, L"WSASendMsg", shim, shimLen)
+                                 : DatagramRoute::Direct) {
+        case DatagramRoute::Direct: break;
+        case DatagramRoute::Failed: return SOCKET_ERROR;
+        case DatagramRoute::Relay: {
+            // Адрес назначения — на время вызова; Winsock копирует его при постановке операции
+            LPSOCKADDR name = msg->name;
+            const INT nameLen = msg->namelen;
+            msg->name = const_cast<LPSOCKADDR>(shim);
+            msg->namelen = shimLen;
+            const int rc = Real_WSASendMsg(s, msg, flags, bytesSent, overlapped, completion);
+            const int err = WSAGetLastError();
+            msg->name = name;
+            msg->namelen = nameLen;
+            WSASetLastError(err);
+            return rc;
+        }
         }
         return Real_WSASendMsg(s, msg, flags, bytesSent, overlapped, completion);
     }
@@ -604,6 +671,242 @@ int WSAAPI Hook_WSASendMsg(SOCKET s, LPWSAMSG msg, DWORD flags, LPDWORD bytesSen
         return SOCKET_ERROR;
     }
     return Real_WSASendMsg(s, msg, flags, bytesSent, overlapped, completion);
+}
+
+// --- приём UDP через прокси (#46): адрес отправителя — исходный, а не внутреннего сокета ---
+
+// Адрес копируется через SEH: при завершении асинхронной операции программа могла уже
+// освободить буфер адреса (если результат забрала мимо перехваченных функций)
+bool CopyAddressIn(const sockaddr* from, const int* fromLen, sockaddr_storage& out, int& len)
+{
+    __try {
+        len = *fromLen;
+        if (len < static_cast<int>(sizeof(sockaddr_in)) || len > static_cast<int>(sizeof(out))) {
+            return false;
+        }
+        std::memcpy(&out, from, static_cast<size_t>(len));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void CopyAddressOut(sockaddr* from, int* fromLen, const sockaddr_storage& in, int len)
+{
+    __try {
+        std::memcpy(from, &in, static_cast<size_t>(len));
+        *fromLen = len;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void RewriteFrom(sockaddr* from, int* fromLen)
+{
+    if (!from || !fromLen || !UdpRelayActive()) {
+        return;
+    }
+    sockaddr_storage copy{};
+    int len = 0;
+    if (!CopyAddressIn(from, fromLen, copy, len)) {
+        return;
+    }
+    const int before = len;
+    sockaddr_storage original = copy;
+    UdpRelayRewriteFrom(reinterpret_cast<sockaddr*>(&original), &len);
+    if (len != before || std::memcmp(&original, &copy, static_cast<size_t>(len)) != 0) {
+        CopyAddressOut(from, fromLen, original, len);
+    }
+}
+
+// Асинхронный приём: куда записать адрес отправителя по завершении
+struct PendingReceive {
+    SOCKET s = INVALID_SOCKET;
+    sockaddr* from = nullptr;
+    int* fromLen = nullptr;
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE completion = nullptr;
+};
+SRWLOCK g_pendingLock = SRWLOCK_INIT;
+std::unordered_map<LPWSAOVERLAPPED, PendingReceive> g_pending;
+std::atomic<size_t> g_pendingCount{0};
+
+void TrackReceive(LPWSAOVERLAPPED overlapped, const PendingReceive& p)
+{
+    AcquireSRWLockExclusive(&g_pendingLock);
+    if (g_pending.size() > 4096) {
+        g_pending.clear();   // забытые операции (результат забран мимо перехватов)
+    }
+    g_pending[overlapped] = p;
+    g_pendingCount = g_pending.size();
+    ReleaseSRWLockExclusive(&g_pendingLock);
+}
+
+std::optional<PendingReceive> TakeReceive(LPOVERLAPPED overlapped)
+{
+    if (!overlapped || g_pendingCount.load(std::memory_order_relaxed) == 0) {
+        return std::nullopt;
+    }
+    std::optional<PendingReceive> out;
+    AcquireSRWLockExclusive(&g_pendingLock);
+    if (const auto it = g_pending.find(overlapped); it != g_pending.end()) {
+        out = it->second;
+        g_pending.erase(it);
+        g_pendingCount = g_pending.size();
+    }
+    ReleaseSRWLockExclusive(&g_pendingLock);
+    return out;
+}
+
+void DropReceives(SOCKET s)
+{
+    if (g_pendingCount.load(std::memory_order_relaxed) == 0) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_pendingLock);
+    std::erase_if(g_pending, [&](const auto& item) { return item.second.s == s; });
+    g_pendingCount = g_pending.size();
+    ReleaseSRWLockExclusive(&g_pendingLock);
+}
+
+void CompleteReceive(LPOVERLAPPED overlapped)
+{
+    if (const auto p = TakeReceive(overlapped)) {
+        RewriteFrom(p->from, p->fromLen);
+    }
+}
+
+void CALLBACK ReceiveCompleted(DWORD error, DWORD bytes, LPWSAOVERLAPPED overlapped, DWORD flags)
+{
+    const auto p = TakeReceive(overlapped);
+    if (!p) {
+        return;
+    }
+    if (error == 0) {
+        RewriteFrom(p->from, p->fromLen);
+    }
+    if (p->completion) {
+        p->completion(error, bytes, overlapped, flags);
+    }
+}
+
+// Общая часть WSARecvFrom / WSARecvMsg: call — вызов оригинала с данной функцией завершения
+template <typename Call>
+int Receive(SOCKET s, sockaddr* from, int* fromLen, LPWSAOVERLAPPED overlapped,
+            LPWSAOVERLAPPED_COMPLETION_ROUTINE completion, Call call)
+{
+    if (!g_proxy || !from || !fromLen) {
+        return call(completion);
+    }
+    if (!overlapped) {
+        const int rc = call(completion);
+        if (rc == 0) {
+            RewriteFrom(from, fromLen);
+        }
+        return rc;
+    }
+    TrackReceive(overlapped, {s, from, fromLen, completion});
+    const int rc = call(completion ? &ReceiveCompleted : nullptr);
+    const int err = WSAGetLastError();
+    if (rc == 0) {
+        RewriteFrom(from, fromLen);   // уже завершено; повторная подмена при завершении ничего не меняет
+    } else if (err != WSA_IO_PENDING) {
+        TakeReceive(overlapped);
+    }
+    WSASetLastError(err);
+    return rc;
+}
+
+int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags, sockaddr* from, int* fromlen)
+{
+    const int rc = Real_recvfrom(s, buf, len, flags, from, fromlen);
+    if (rc != SOCKET_ERROR) {
+        const int err = WSAGetLastError();
+        RewriteFrom(from, fromlen);
+        WSASetLastError(err);
+    }
+    return rc;
+}
+
+int WSAAPI Hook_WSARecvFrom(SOCKET s, LPWSABUF buffers, DWORD bufferCount, LPDWORD received, LPDWORD flags,
+                            sockaddr* from, LPINT fromlen, LPWSAOVERLAPPED overlapped,
+                            LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    return Receive(s, from, fromlen, overlapped, completion, [&](LPWSAOVERLAPPED_COMPLETION_ROUTINE routine) {
+        return Real_WSARecvFrom(s, buffers, bufferCount, received, flags, from, fromlen, overlapped, routine);
+    });
+}
+
+INT PASCAL Hook_WSARecvMsg(SOCKET s, LPWSAMSG msg, LPDWORD received, LPWSAOVERLAPPED overlapped,
+                           LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    return Receive(s, msg ? msg->name : nullptr, msg ? &msg->namelen : nullptr, overlapped, completion,
+                   [&](LPWSAOVERLAPPED_COMPLETION_ROUTINE routine) {
+                       return Real_WSARecvMsg(s, msg, received, overlapped, routine);
+                   });
+}
+
+BOOL WSAAPI Hook_WSAGetOverlappedResult(SOCKET s, LPWSAOVERLAPPED overlapped, LPDWORD transferred, BOOL wait,
+                                        LPDWORD flags)
+{
+    const BOOL ok = Real_WSAGetOverlappedResult(s, overlapped, transferred, wait, flags);
+    if (ok) {
+        const int err = WSAGetLastError();
+        CompleteReceive(overlapped);
+        WSASetLastError(err);
+    }
+    return ok;
+}
+
+BOOL WINAPI Hook_GetOverlappedResult(HANDLE file, LPOVERLAPPED overlapped, LPDWORD transferred, BOOL wait)
+{
+    const BOOL ok = Real_GetOverlappedResult(file, overlapped, transferred, wait);
+    if (ok && g_pendingCount.load(std::memory_order_relaxed) != 0) {
+        const DWORD err = GetLastError();
+        CompleteReceive(overlapped);
+        SetLastError(err);
+    }
+    return ok;
+}
+
+BOOL WINAPI Hook_GetOverlappedResultEx(HANDLE file, LPOVERLAPPED overlapped, LPDWORD transferred, DWORD ms,
+                                       BOOL alertable)
+{
+    const BOOL ok = Real_GetOverlappedResultEx(file, overlapped, transferred, ms, alertable);
+    if (ok && g_pendingCount.load(std::memory_order_relaxed) != 0) {
+        const DWORD err = GetLastError();
+        CompleteReceive(overlapped);
+        SetLastError(err);
+    }
+    return ok;
+}
+
+BOOL WINAPI Hook_GetQueuedCompletionStatus(HANDLE port, LPDWORD transferred, PULONG_PTR key,
+                                           LPOVERLAPPED* overlapped, DWORD ms)
+{
+    const BOOL ok = Real_GetQueuedCompletionStatus(port, transferred, key, overlapped, ms);
+    if (overlapped && *overlapped && g_pendingCount.load(std::memory_order_relaxed) != 0) {
+        const DWORD err = GetLastError();
+        if (ok) {
+            CompleteReceive(*overlapped);
+        } else {
+            TakeReceive(*overlapped);
+        }
+        SetLastError(err);
+    }
+    return ok;
+}
+
+BOOL WINAPI Hook_GetQueuedCompletionStatusEx(HANDLE port, LPOVERLAPPED_ENTRY entries, ULONG count, PULONG removed,
+                                             DWORD ms, BOOL alertable)
+{
+    const BOOL ok = Real_GetQueuedCompletionStatusEx(port, entries, count, removed, ms, alertable);
+    if (ok && removed && g_pendingCount.load(std::memory_order_relaxed) != 0) {
+        const DWORD err = GetLastError();
+        for (ULONG i = 0; i < *removed; ++i) {
+            CompleteReceive(entries[i].lpOverlapped);
+        }
+        SetLastError(err);
+    }
+    return ok;
 }
 
 // bind() на "любой адрес" (0.0.0.0 / ::) подменяется адресом интерфейса — так, например,
@@ -711,6 +1014,8 @@ int WSAAPI Hook_closesocket(SOCKET s)
         AcquireSRWLockExclusive(&g_proxiedLock);
         g_proxied.erase(s);
         ReleaseSRWLockExclusive(&g_proxiedLock);
+        UdpRelayClose(s);
+        DropReceives(s);
     }
     return Real_closesocket(s);
 }
@@ -727,6 +1032,19 @@ int WSAAPI Hook_WSAIoctl(SOCKET s, DWORD code, LPVOID inBuffer, DWORD inSize, LP
         return rc;
     }
     static const GUID connectExId = WSAID_CONNECTEX;
+    static const GUID recvMsgId = WSAID_WSARECVMSG;
+    if (g_proxy && std::memcmp(inBuffer, &recvMsgId, sizeof(GUID)) == 0) {
+        auto* fn = static_cast<LPFN_WSARECVMSG*>(outBuffer);
+        AcquireSRWLockExclusive(&g_connectExLock);
+        if (!Real_WSARecvMsg) {
+            Real_WSARecvMsg = *fn;
+        }
+        if (*fn == Real_WSARecvMsg) {
+            *fn = &Hook_WSARecvMsg;
+        }
+        ReleaseSRWLockExclusive(&g_connectExLock);
+        return rc;
+    }
     if (std::memcmp(inBuffer, &connectExId, sizeof(GUID)) != 0) {
         return rc;
     }
@@ -746,9 +1064,9 @@ int WSAAPI Hook_WSAIoctl(SOCKET s, DWORD code, LPVOID inBuffer, DWORD inSize, LP
 }
 
 template <typename T>
-bool HookApi(const char* name, T* detour, T** original)
+bool HookApi(const char* name, T* detour, T** original, const wchar_t* module = L"ws2_32")
 {
-    const MH_STATUS st = MH_CreateHookApi(L"ws2_32", name, reinterpret_cast<LPVOID>(detour),
+    const MH_STATUS st = MH_CreateHookApi(module, name, reinterpret_cast<LPVOID>(detour),
                                           reinterpret_cast<LPVOID*>(original));
     if (st != MH_OK) {
         Log(L"не удалось перехватить %hs: %hs", name, MH_StatusToString(st));
@@ -816,6 +1134,23 @@ void Install()
     if (g_proxy) {
         HookApi("getpeername", &Hook_getpeername, &Real_getpeername);
         HookApi("setsockopt", &Hook_setsockopt, &Real_setsockopt);
+        // UDP через прокси (#46)
+        HookApi("recvfrom", &Hook_recvfrom, &Real_recvfrom);
+        HookApi("WSARecvFrom", &Hook_WSARecvFrom, &Real_WSARecvFrom);
+        HookApi("WSAGetOverlappedResult", &Hook_WSAGetOverlappedResult, &Real_WSAGetOverlappedResult);
+        HookApi("GetOverlappedResult", &Hook_GetOverlappedResult, &Real_GetOverlappedResult, L"kernelbase");
+        HookApi("GetOverlappedResultEx", &Hook_GetOverlappedResultEx, &Real_GetOverlappedResultEx, L"kernelbase");
+        HookApi("GetQueuedCompletionStatus", &Hook_GetQueuedCompletionStatus, &Real_GetQueuedCompletionStatus,
+                L"kernelbase");
+        HookApi("GetQueuedCompletionStatusEx", &Hook_GetQueuedCompletionStatusEx, &Real_GetQueuedCompletionStatusEx,
+                L"kernelbase");
+        UdpRelayApi api;
+        api.connect = Real_connect;
+        api.sendto = Real_sendto;
+        api.recvfrom = Real_recvfrom;
+        api.closesocket = Real_closesocket;
+        api.getsockname = Real_getsockname;
+        UdpRelayInit(*g_proxy, api);
     }
     g_fakeDns = CreateDnsHooks(g_resolver, g_policy, g_proxy ? &g_fakeIps : nullptr);
     CreateProcessHooks(config);

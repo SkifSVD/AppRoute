@@ -575,7 +575,7 @@ void UpdateAdapterInfo(HWND dlg, const RuleDialog& d)
         const std::wstring id = d.guids[static_cast<size_t>(sel)];
         info = id == kOtherProxy ? L""
                                  : ProxyState(id.substr(kProxyPrefix.size())) +
-                                       L" · TCP через прокси, имена разрешает прокси, UDP блокируется";
+                                       L" · TCP и UDP через прокси, имена разрешает прокси";
     } else if (sel >= 0 && static_cast<size_t>(sel) < d.guids.size()) {
         if (const NetAdapter* a = AdapterByGuid(d.guids[static_cast<size_t>(sel)])) {
             const std::wstring v4 = FirstAddress(*a, AF_INET);

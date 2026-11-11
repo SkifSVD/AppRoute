@@ -169,6 +169,71 @@ std::optional<size_t> Socks5ReplyLength(std::string_view head)
     }
 }
 
+std::string Socks5UdpAssociateRequest()
+{
+    return std::string("\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+}
+
+std::optional<SOCKADDR_INET> Socks5ReplyAddress(std::string_view reply)
+{
+    const auto total = Socks5ReplyLength(reply);
+    if (!total || reply.size() < *total) {
+        return std::nullopt;
+    }
+    SOCKADDR_INET a{};
+    const auto* p = reinterpret_cast<const unsigned char*>(reply.data());
+    switch (p[3]) {
+    case 0x01:
+        a.Ipv4.sin_family = AF_INET;
+        std::memcpy(&a.Ipv4.sin_addr, p + 4, 4);
+        std::memcpy(&a.Ipv4.sin_port, p + 8, 2);
+        return a;
+    case 0x04:
+        a.Ipv6.sin6_family = AF_INET6;
+        std::memcpy(&a.Ipv6.sin6_addr, p + 4, 16);
+        std::memcpy(&a.Ipv6.sin6_port, p + 20, 2);
+        return a;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::string Socks5UdpHeader(const SOCKADDR_INET& target)
+{
+    std::string out = Socks5ConnectRequest(target);
+    out[1] = 0x00;   // RSV RSV FRAG вместо VER CMD RSV
+    out[0] = 0x00;
+    return out;
+}
+
+std::optional<std::string> Socks5UdpHeader(std::string_view host, USHORT port)
+{
+    auto out = Socks5ConnectRequest(host, port);
+    if (out) {
+        (*out)[0] = 0x00;
+        (*out)[1] = 0x00;
+    }
+    return out;
+}
+
+std::optional<size_t> Socks5UdpHeaderLength(std::string_view datagram)
+{
+    if (datagram.size() < 5 || datagram[0] != 0 || datagram[1] != 0 || datagram[2] != 0) {
+        return std::nullopt;
+    }
+    size_t length = 0;
+    switch (static_cast<uint8_t>(datagram[3])) {
+    case 0x01: length = 4 + 4 + 2; break;
+    case 0x04: length = 4 + 16 + 2; break;
+    case 0x03: length = 4 + 1 + static_cast<uint8_t>(datagram[4]) + 2; break;
+    default: return std::nullopt;
+    }
+    if (datagram.size() < length) {
+        return std::nullopt;
+    }
+    return length;
+}
+
 const wchar_t* Socks5ReplyText(uint8_t code)
 {
     switch (code) {

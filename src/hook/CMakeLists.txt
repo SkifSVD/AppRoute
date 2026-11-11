@@ -12,6 +12,7 @@ add_library(approute_hook SHARED
     Hooks.h           Hooks.cpp
     ProcessHooks.h    ProcessHooks.cpp
     DnsHooks.h        DnsHooks.cpp
+    UdpRelay.h        UdpRelay.cpp
     Log.h             Log.cpp
 )
 set_target_properties(approute_hook PROPERTIES OUTPUT_NAME ${APPROUTE_HOOK_NAME})

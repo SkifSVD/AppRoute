@@ -5,6 +5,10 @@
 // Перехватываем только обычные запросы по имени узла. Числовые адреса, запросы со службой
 // (AI_NUMERICHOST, getaddrinfo по порту-службе) и всё, чего резолвер не покрыл, отдаём
 // оригиналу. APPROUTE_DNS=system отключает перехват.
+//
+// Асинхронный GetAddrInfoExW (OVERLAPPED; так разрешает имена .NET, #46) выполняется в пуле
+// потоков и завершается как у Windows: результат в *ppResult, код в OVERLAPPED и
+// GetAddrInfoExOverlappedResult, затем функция завершения или событие hEvent.
 
 #include "DnsHooks.h"
 #include "AdapterResolver.h"
@@ -21,7 +25,9 @@
 
 #include <MinHook.h>
 
+#include <atomic>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -41,6 +47,8 @@ decltype(&::GetAddrInfoExW) Real_GetAddrInfoExW = &::GetAddrInfoExW;
 decltype(&::freeaddrinfo) Real_freeaddrinfo = &::freeaddrinfo;
 decltype(&::FreeAddrInfoW) Real_FreeAddrInfoW = &::FreeAddrInfoW;
 void(WSAAPI* Real_FreeAddrInfoExW)(PADDRINFOEXW) = &::FreeAddrInfoExW;
+decltype(&::GetAddrInfoExCancel) Real_GetAddrInfoExCancel = &::GetAddrInfoExCancel;
+decltype(&::GetAddrInfoExOverlappedResult) Real_GetAddrInfoExOverlappedResult = &::GetAddrInfoExOverlappedResult;
 
 // Списки, которые выделили мы (CRT-куча через calloc): их нельзя отдавать оригинальному
 // free из ws2_32 — он использует другой аллокатор. Ключ — головной указатель.
@@ -356,29 +364,16 @@ int WSAAPI Hook_getaddrinfo(const char* node, const char* service, const addrinf
     return 0;
 }
 
-// GetAddrInfoExW: поддерживаем только синхронный вызов по имени (lpOverlapped == nullptr).
-// Асинхронные и прочие сложные варианты (name/DNS options) отдаём оригиналу.
-int WSAAPI Hook_GetAddrInfoExW(PCWSTR name, PCWSTR serviceName, DWORD nameSpace, LPGUID nspId,
-                               const ADDRINFOEXW* hints, PADDRINFOEXW* result, timeval* timeout,
-                               LPOVERLAPPED overlapped, LPLOOKUPSERVICE_COMPLETION_ROUTINE completion,
-                               LPHANDLE handle)
+// Ответ на запрос GetAddrInfoExW по имени: код и список (наш или системного резолвера)
+int ResolveEx(PCWSTR name, PCWSTR serviceName, const ADDRINFOEXW* hints, PADDRINFOEXW* result, bool& handled)
 {
-    auto callReal = [&] {
-        return Real_GetAddrInfoExW(name, serviceName, nameSpace, nspId, hints, result, timeout,
-                                   overlapped, completion, handle);
-    };
-    if (overlapped || completion || !name || (hints && (hints->ai_flags & AI_NUMERICHOST))) {
-        return callReal();
-    }
-    SOCKADDR_INET tmp{};
-    if (InetPtonW(AF_INET, name, &tmp.Ipv4.sin_addr) == 1 || InetPtonW(AF_INET6, name, &tmp.Ipv6.sin6_addr) == 1) {
-        return callReal();
-    }
-
+    handled = true;
     const int family = hints && hints->ai_family != AF_UNSPEC ? hints->ai_family : AF_UNSPEC;
     DnsAnswer answer;
     switch (ResolveName(name, family, answer)) {
-    case Resolution::System: return callReal();
+    case Resolution::System:
+        handled = false;
+        return 0;
     case Resolution::Block: *result = nullptr; return WSATRY_AGAIN;
     case Resolution::Answer: break;
     }
@@ -386,7 +381,6 @@ int WSAAPI Hook_GetAddrInfoExW(PCWSTR name, PCWSTR serviceName, DWORD nameSpace,
         *result = nullptr;
         return WSAHOST_NOT_FOUND;
     }
-
     const USHORT port = PortFromService(serviceName, nullptr);
     const int sockType = hints ? hints->ai_socktype : 0;
     const int protocol = hints ? hints->ai_protocol : 0;
@@ -396,6 +390,185 @@ int WSAAPI Hook_GetAddrInfoExW(PCWSTR name, PCWSTR serviceName, DWORD nameSpace,
     RegisterOwn(head);
     Log(L"GetAddrInfoExW %ls → %zu адр. через %ls", name, answer.addresses.size(), answer.via);
     return head ? 0 : WSA_NOT_ENOUGH_MEMORY;
+}
+
+bool IsNumericHost(PCWSTR name)
+{
+    SOCKADDR_INET tmp{};
+    return InetPtonW(AF_INET, name, &tmp.Ipv4.sin_addr) == 1 || InetPtonW(AF_INET6, name, &tmp.Ipv6.sin6_addr) == 1;
+}
+
+// --- асинхронный GetAddrInfoExW -------------------------------------------------------------
+
+struct AsyncLookup {
+    std::wstring name;
+    std::wstring service;
+    bool hasService = false;
+    DWORD nameSpace = NS_ALL;
+    GUID nspId{};
+    bool hasNspId = false;
+    ADDRINFOEXW hints{};
+    bool hasHints = false;
+    PADDRINFOEXW* result = nullptr;
+    LPOVERLAPPED overlapped = nullptr;
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE completion = nullptr;
+    std::atomic<bool> cancelled{false};
+};
+
+// Незавершённые запросы (ключ — выданный программе дескриптор отмены) и OVERLAPPED завершённых
+// (для GetAddrInfoExOverlappedResult)
+SRWLOCK g_asyncLock = SRWLOCK_INIT;
+std::unordered_set<AsyncLookup*> g_asyncPending;
+std::unordered_set<LPOVERLAPPED> g_asyncDone;
+
+void CALLBACK LookupWork(PTP_CALLBACK_INSTANCE, void* context)
+{
+    std::unique_ptr<AsyncLookup> op(static_cast<AsyncLookup*>(context));
+    PADDRINFOEXW list = nullptr;
+    int rc = WSA_E_CANCELLED;
+    if (!op->cancelled) {
+        PCWSTR service = op->hasService ? op->service.c_str() : nullptr;
+        const ADDRINFOEXW* hints = op->hasHints ? &op->hints : nullptr;
+        LPGUID nspId = op->hasNspId ? &op->nspId : nullptr;
+        bool handled = false;
+        rc = ResolveEx(op->name.c_str(), service, hints, &list, handled);
+        if (!handled) {
+            // Системный резолвер — синхронно, в этом же потоке пула
+            rc = Real_GetAddrInfoExW(op->name.c_str(), service, op->nameSpace, nspId, hints, &list, nullptr,
+                                     nullptr, nullptr, nullptr);
+        }
+    }
+    AcquireSRWLockExclusive(&g_asyncLock);
+    g_asyncPending.erase(op.get());
+    if (op->cancelled && list) {
+        rc = WSA_E_CANCELLED;
+    }
+    if (g_asyncDone.size() > 1024) {
+        g_asyncDone.clear();
+    }
+    g_asyncDone.insert(op->overlapped);
+    ReleaseSRWLockExclusive(&g_asyncLock);
+    if (rc == WSA_E_CANCELLED && list) {
+        if (TakeOwn(list)) {
+            FreeOwn(list);
+        } else {
+            Real_FreeAddrInfoExW(list);
+        }
+        list = nullptr;
+    }
+    *op->result = list;
+    op->overlapped->Internal = static_cast<ULONG_PTR>(rc);
+    op->overlapped->InternalHigh = 0;
+    if (op->completion) {
+        op->completion(static_cast<DWORD>(rc), 0, op->overlapped);
+    } else if (op->overlapped->hEvent) {
+        SetEvent(op->overlapped->hEvent);
+    }
+}
+
+int StartAsyncLookup(PCWSTR name, PCWSTR serviceName, DWORD nameSpace, LPGUID nspId, const ADDRINFOEXW* hints,
+                     PADDRINFOEXW* result, LPOVERLAPPED overlapped, LPLOOKUPSERVICE_COMPLETION_ROUTINE completion,
+                     LPHANDLE handle)
+{
+    auto op = std::make_unique<AsyncLookup>();
+    op->name = name;
+    if (serviceName) {
+        op->service = serviceName;
+        op->hasService = true;
+    }
+    op->nameSpace = nameSpace;
+    if (nspId) {
+        op->nspId = *nspId;
+        op->hasNspId = true;
+    }
+    if (hints) {
+        op->hints.ai_flags = hints->ai_flags;
+        op->hints.ai_family = hints->ai_family;
+        op->hints.ai_socktype = hints->ai_socktype;
+        op->hints.ai_protocol = hints->ai_protocol;
+        op->hasHints = true;
+    }
+    op->result = result;
+    op->overlapped = overlapped;
+    op->completion = completion;
+    *result = nullptr;
+    overlapped->Internal = static_cast<ULONG_PTR>(WSA_IO_PENDING);
+
+    AsyncLookup* raw = op.get();
+    AcquireSRWLockExclusive(&g_asyncLock);
+    g_asyncPending.insert(raw);
+    g_asyncDone.erase(overlapped);
+    ReleaseSRWLockExclusive(&g_asyncLock);
+    if (handle) {
+        *handle = reinterpret_cast<HANDLE>(raw);
+    }
+    if (!TrySubmitThreadpoolCallback(&LookupWork, raw, nullptr)) {
+        AcquireSRWLockExclusive(&g_asyncLock);
+        g_asyncPending.erase(raw);
+        ReleaseSRWLockExclusive(&g_asyncLock);
+        if (handle) {
+            *handle = nullptr;
+        }
+        return WSA_NOT_ENOUGH_MEMORY;
+    }
+    op.release();   // освободит LookupWork
+    return WSA_IO_PENDING;
+}
+
+int WSAAPI Hook_GetAddrInfoExW(PCWSTR name, PCWSTR serviceName, DWORD nameSpace, LPGUID nspId,
+                               const ADDRINFOEXW* hints, PADDRINFOEXW* result, timeval* timeout,
+                               LPOVERLAPPED overlapped, LPLOOKUPSERVICE_COMPLETION_ROUTINE completion,
+                               LPHANDLE handle)
+{
+    auto callReal = [&] {
+        return Real_GetAddrInfoExW(name, serviceName, nameSpace, nspId, hints, result, timeout,
+                                   overlapped, completion, handle);
+    };
+    if (!name || !result || (hints && (hints->ai_flags & AI_NUMERICHOST)) || IsNumericHost(name) ||
+        (completion && !overlapped)) {
+        return callReal();
+    }
+    if (overlapped) {
+        return StartAsyncLookup(name, serviceName, nameSpace, nspId, hints, result, overlapped, completion, handle);
+    }
+    bool handled = false;
+    const int rc = ResolveEx(name, serviceName, hints, result, handled);
+    return handled ? rc : callReal();
+}
+
+INT WSAAPI Hook_GetAddrInfoExCancel(LPHANDLE handle)
+{
+    if (handle) {
+        AcquireSRWLockShared(&g_asyncLock);
+        const auto it = g_asyncPending.find(reinterpret_cast<AsyncLookup*>(*handle));
+        const bool ours = it != g_asyncPending.end();
+        if (ours) {
+            (*it)->cancelled = true;
+        }
+        ReleaseSRWLockShared(&g_asyncLock);
+        if (ours) {
+            return NO_ERROR;   // запрос завершится с WSA_E_CANCELLED
+        }
+    }
+    return Real_GetAddrInfoExCancel(handle);
+}
+
+INT WSAAPI Hook_GetAddrInfoExOverlappedResult(LPOVERLAPPED overlapped)
+{
+    if (overlapped) {
+        AcquireSRWLockShared(&g_asyncLock);
+        bool ours = g_asyncDone.count(overlapped) != 0;
+        if (!ours) {
+            for (AsyncLookup* op : g_asyncPending) {
+                ours = ours || op->overlapped == overlapped;
+            }
+        }
+        ReleaseSRWLockShared(&g_asyncLock);
+        if (ours) {
+            return static_cast<INT>(overlapped->Internal);
+        }
+    }
+    return Real_GetAddrInfoExOverlappedResult(overlapped);
 }
 
 void WSAAPI Hook_freeaddrinfo(addrinfo* list)
@@ -457,6 +630,9 @@ bool CreateDnsHooks(AdapterResolver& resolver, const UnavailablePolicy& policy, 
     HookApi("freeaddrinfo", &Hook_freeaddrinfo, &Real_freeaddrinfo);
     HookApi("FreeAddrInfoW", &Hook_FreeAddrInfoW, &Real_FreeAddrInfoW);
     HookApi("FreeAddrInfoExW", &Hook_FreeAddrInfoExW, &Real_FreeAddrInfoExW);
+    HookApi("GetAddrInfoExCancel", &Hook_GetAddrInfoExCancel, &Real_GetAddrInfoExCancel);
+    HookApi("GetAddrInfoExOverlappedResult", &Hook_GetAddrInfoExOverlappedResult,
+            &Real_GetAddrInfoExOverlappedResult);
     return true;
 }
 

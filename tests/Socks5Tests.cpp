@@ -56,6 +56,32 @@ TEST(Socks5Messages)
     CHECK(Socks5ReplyToWsaError(0x04) == WSAEHOSTUNREACH);
 }
 
+TEST(Socks5UdpMessages)
+{
+    CHECK(Socks5UdpAssociateRequest() == std::string("\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00", 10));
+
+    // Ответ на UDP ASSOCIATE: адрес реле 127.0.0.1:10808
+    const auto relay = Socks5ReplyAddress(std::string("\x05\x00\x00\x01\x7F\x00\x00\x01\x2A\x38", 10));
+    CHECK(relay && relay->si_family == AF_INET && ntohl(relay->Ipv4.sin_addr.s_addr) == 0x7F000001 &&
+          ntohs(relay->Ipv4.sin_port) == 10808);
+    CHECK(!Socks5ReplyAddress(std::string("\x05\x00\x00\x01\x7F\x00", 6)));        // обрезан
+    CHECK(!Socks5ReplyAddress(std::string("\x05\x00\x00\x03\x01" "a\x00\x50", 8)));  // имя — не адрес
+
+    SOCKADDR_INET t{};
+    t.Ipv4.sin_family = AF_INET;
+    t.Ipv4.sin_addr.s_addr = htonl(0x08080808);
+    t.Ipv4.sin_port = htons(53);
+    const std::string header = Socks5UdpHeader(t);
+    CHECK(header == std::string("\x00\x00\x00\x01\x08\x08\x08\x08\x00\x35", 10));
+    const auto byName = Socks5UdpHeader("example.com", htons(443));
+    CHECK(byName && *byName == std::string("\x00\x00\x00\x03\x0B" "example.com" "\x01\xBB", 18));
+
+    CHECK(Socks5UdpHeaderLength(header + "data") == 10u);
+    CHECK(Socks5UdpHeaderLength(*byName) == 18u);
+    CHECK(!Socks5UdpHeaderLength(std::string("\x00\x00\x01\x01\x08\x08\x08\x08\x00\x35", 10)));   // фрагмент
+    CHECK(!Socks5UdpHeaderLength(std::string("\x00\x00\x00\x01\x08\x08", 6)));
+}
+
 TEST(FakeIpPoolMapsNames)
 {
     FakeIpPool pool;

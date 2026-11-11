@@ -45,6 +45,22 @@ std::optional<std::string> Socks5ConnectRequest(std::string_view host, USHORT po
 // неверный ответ.
 std::optional<size_t> Socks5ReplyLength(std::string_view head);
 
+// UDP ASSOCIATE (#46): адрес клиента 0.0.0.0:0 — датаграммы придут с адреса, известного
+// только после привязки сокета.
+std::string Socks5UdpAssociateRequest();
+
+// BND.ADDR:BND.PORT из полного ответа (для UDP ASSOCIATE — адрес реле). Только IP-адрес
+// (ATYP 1 / 4); порт — сетевой порядок.
+std::optional<SOCKADDR_INET> Socks5ReplyAddress(std::string_view reply);
+
+// Заголовок датаграммы UDP через прокси: RSV RSV FRAG(0) ATYP DST.ADDR DST.PORT.
+std::string Socks5UdpHeader(const SOCKADDR_INET& target);
+std::optional<std::string> Socks5UdpHeader(std::string_view host, USHORT port);
+
+// Длина заголовка датаграммы от реле; nullopt — неверный заголовок или фрагмент (FRAG != 0,
+// фрагменты не поддерживаются — такие датаграммы отбрасываются).
+std::optional<size_t> Socks5UdpHeaderLength(std::string_view datagram);
+
 // Код ответа (REP): 0 — успех. Описание и код ошибки Winsock для программы.
 const wchar_t* Socks5ReplyText(uint8_t code);
 int Socks5ReplyToWsaError(uint8_t code);
