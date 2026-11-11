@@ -88,7 +88,7 @@ function CheckRedirected([string]$how) {
 
 if ($Service) {
     # --- служба AppRoute с драйвером: правила без отдельного процесса
-    & $routes install-service --config $config --client-sid $sid --with-driver 2>&1 | Out-File $wfpLog -Encoding UTF8
+    & $routes install-service --config $config --client-sid $sid --with-driver
     Check 'служба AppRoute запущена' ((Get-Service AppRoute -ErrorAction SilentlyContinue).Status -eq 'Running')
     Check 'драйвер загружен вместе со службой' ((Get-Service approute-wfp -ErrorAction SilentlyContinue).Status -eq 'Running')
     Start-Sleep 3
@@ -143,7 +143,7 @@ $statsText = if ($stats) {
 
 if ($Service) {
     $serviceTail = Get-Content $serviceLog -Tail 25 -Encoding UTF8 -ErrorAction SilentlyContinue
-    & $routes uninstall-service 2>&1 | Out-File $wfpLog -Encoding UTF8 -Append
+    & $routes uninstall-service
     Check 'служба AppRoute удалена' (-not (Get-Service AppRoute -ErrorAction SilentlyContinue))
     Check 'драйвер удалён вместе со службой' (-not (Get-Service approute-wfp -ErrorAction SilentlyContinue))
     $installed = Join-Path $env:ProgramFiles 'AppRoute\approute-wfp.sys'
@@ -158,9 +158,13 @@ Write-Host '=== Итог (скопируйте в чат) ==='
 $results
 '--- счётчики драйвера ---'
 $statsText
-'--- вывод approute-routes ---'
-Get-Content $wfpLog, $wfpErr -Encoding UTF8 -ErrorAction SilentlyContinue
 if ($Service) {
+    # install-service / uninstall-service пишут итог не в консоль, а в install.log (его читает окно)
+    '--- журнал установки (конец) ---'
+    Get-Content (Join-Path $env:ProgramData 'AppRoute\install.log') -Tail 6 -Encoding UTF8 -ErrorAction SilentlyContinue
     '--- журнал службы (конец) ---'
     $serviceTail
+} else {
+    '--- вывод approute-routes wfp ---'
+    Get-Content $wfpLog, $wfpErr -Encoding UTF8 -ErrorAction SilentlyContinue
 }
