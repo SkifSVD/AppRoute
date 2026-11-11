@@ -47,6 +47,9 @@ using namespace approute;
 
 namespace {
 
+// Перепроверка без событий: путь к exe приложения из пакета меняется с его обновлением (#45)
+constexpr DWORD kRecheckMs = 30000;
+
 // --- вывод ----------------------------------------------------------------------------------
 
 HANDLE g_logFile = nullptr;   // serve: журнал вместо консоли
@@ -729,7 +732,7 @@ int RunManager(const Options& options, bool withPipe, const wchar_t* who)
         handles.push_back(configWatch.Event());
     }
     for (;;) {
-        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, kRecheckMs);
         if (w == WAIT_OBJECT_0 || WaitForSingleObject(g_stop, 300) == WAIT_OBJECT_0) {
             break;
         }
@@ -961,7 +964,7 @@ int CmdWfp(const Options& options)
         handles.push_back(configWatch.Event());
     }
     for (;;) {
-        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        const DWORD w = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, kRecheckMs);
         if (w == WAIT_OBJECT_0 || WaitForSingleObject(g_stop, 500) == WAIT_OBJECT_0) {
             break;
         }

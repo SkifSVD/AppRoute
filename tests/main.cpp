@@ -310,6 +310,7 @@ int main()
         const bool ok = Failures() == before;
         failedTests += ok ? 0 : 1;
         std::printf("%s %s\n", ok ? "[ OK ]" : "[FAIL]", test.name);
+        std::fflush(stdout);   // вывод не теряется, если следующий тест упадёт
     }
     std::printf("\n%zu tests, %d failed\n", Registry().size(), failedTests);
     return failedTests == 0 ? 0 : 1;

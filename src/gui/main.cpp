@@ -17,6 +17,7 @@
 #include "core/InstalledApps.h"
 #include "core/Launcher.h"
 #include "core/NetAdapters.h"
+#include "core/PackagedApps.h"
 #include "core/PrimarySwitch.h"
 #include "core/RouteManager.h"
 #include "core/ServiceSetup.h"
@@ -97,6 +98,25 @@ std::wstring Expand(const std::wstring& s)
     wchar_t out[MAX_PATH * 2] = {};
     const DWORD n = ExpandEnvironmentStringsW(s.c_str(), out, static_cast<DWORD>(std::size(out)));
     return n > 0 && n <= std::size(out) ? std::wstring(out) : s;
+}
+
+// Имя программы правила: файл или приложение из пакета (#45)
+std::wstring AppTitle(std::wstring_view app)
+{
+    return IsPackageApp(app) ? PackagedAppName(app) : FileNameOf(app);
+}
+
+// Сведения о приложении из пакета (элемент shell:AppsFolder\AUMID): значок
+bool PackageFileInfo(std::wstring_view app, UINT flags, SHFILEINFOW& sfi)
+{
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    const std::wstring name = L"shell:AppsFolder\\" + std::wstring(app);
+    if (FAILED(SHParseDisplayName(name.c_str(), nullptr, &pidl, 0, nullptr))) {
+        return false;
+    }
+    const bool ok = SHGetFileInfoW(reinterpret_cast<LPCWSTR>(pidl), 0, &sfi, sizeof(sfi), flags | SHGFI_PIDL) != 0;
+    CoTaskMemFree(pidl);
+    return ok;
 }
 
 void SetStatus(const std::wstring& text)
@@ -342,7 +362,9 @@ int IconFor(const Rule& rule)
 {
     const int cx = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForWindow(g.main));
     HICON icon = nullptr;
-    if (IsPath(rule.app)) {
+    if (SHFILEINFOW sfi{}; IsPackageApp(rule.app) && PackageFileInfo(rule.app, SHGFI_ICON | SHGFI_SMALLICON, sfi)) {
+        icon = sfi.hIcon;
+    } else if (IsPath(rule.app)) {
         const std::wstring path = Expand(rule.app);
         SHDefExtractIconW(path.c_str(), 0, 0, &icon, nullptr, static_cast<UINT>(cx));
     }
@@ -435,7 +457,7 @@ void FillList(std::optional<size_t> select)
     ResetIcons();
     for (size_t i = 0; i < g.config.rules.size(); ++i) {
         const Rule& r = g.config.rules[i];
-        std::wstring name = FileNameOf(r.app);
+        std::wstring name = AppTitle(r.app);
         LVITEMW it{};
         it.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
         it.iItem = static_cast<int>(i);
@@ -445,7 +467,9 @@ void FillList(std::optional<size_t> select)
         const int row = ListView_InsertItem(g.list, &it);
         UpdateRow(row, r);
         SetCell(row, ColPolicy, OnUnavailableText(r.onUnavailable));
-        SetCell(row, ColPath, IsPath(r.app) ? r.app : L"(любой каталог)");
+        SetCell(row, ColPath, IsPackageApp(r.app) ? L"из пакета: " + r.app
+                              : IsPath(r.app)      ? r.app
+                                                   : std::wstring(L"(любой каталог)"));
         if (select && *select == i) {
             ListView_SetItemState(g.list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_EnsureVisible(g.list, row, FALSE);
@@ -755,8 +779,9 @@ std::optional<Rule> EditRule(const Rule& initial, std::optional<size_t> index)
 constexpr UINT kMsgAppsLoaded = WM_APP + 2;
 
 struct LoadedApp {
-    InstalledApp app;
-    int icon = -1;     // индекс в системном списке значков
+    InstalledApp app;          // у приложения из пакета path — AUMID (#45)
+    int icon = -1;             // индекс в системном списке значков
+    std::wstring location;     // что показать в «Расположении», если не path
 };
 
 struct Wizard {
@@ -771,6 +796,9 @@ struct Wizard {
 int SystemIconIndex(const std::wstring& path)
 {
     SHFILEINFOW sfi{};
+    if (IsPackageApp(path)) {
+        return PackageFileInfo(path, SHGFI_SYSICONINDEX | SHGFI_SMALLICON, sfi) ? sfi.iIcon : -1;
+    }
     return SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON)
                ? sfi.iIcon : -1;
 }
@@ -792,6 +820,15 @@ void LoadAppsAsync(HWND page)
             const int icon = SystemIconIndex(app.path);
             result->push_back({std::move(app), icon});
         }
+        // Приложения из Microsoft Store и MSIX — правило по AUMID (#45)
+        for (auto& p : EnumeratePackagedApps()) {
+            const int icon = SystemIconIndex(p.app);
+            result->push_back({{std::move(p.name), p.app}, icon, L"Microsoft Store / MSIX: " + p.executable});
+        }
+        std::stable_sort(result->begin(), result->end(), [](const LoadedApp& a, const LoadedApp& b) {
+            return CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE, a.app.name.c_str(), -1,
+                                   b.app.name.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN;
+        });
         CoUninitialize();
         if (!PostMessageW(page, kMsgAppsLoaded, 0, reinterpret_cast<LPARAM>(result))) {
             delete result;   // мастер уже закрыт
@@ -911,7 +948,8 @@ void FillApps(HWND page, Wizard& w)
         it.pszText = const_cast<wchar_t*>(a.app.name.c_str());
         it.iImage = a.icon;
         const int inserted = ListView_InsertItem(list, &it);
-        ListView_SetItemText(list, inserted, 1, const_cast<wchar_t*>(a.app.path.c_str()));
+        const std::wstring& location = a.location.empty() ? a.app.path : a.location;
+        ListView_SetItemText(list, inserted, 1, const_cast<wchar_t*>(location.c_str()));
         if (EqualsIgnoreCase(a.app.path, w.rule.app)) {
             ListView_SetItemState(list, inserted, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_EnsureVisible(list, inserted, FALSE);
@@ -926,7 +964,10 @@ void UpdateAppStep(HWND page, Wizard& w)
 {
     std::wstring chosen;
     if (!w.rule.app.empty()) {
-        chosen = L"Выбрано: " + w.rule.app;
+        chosen = IsPackageApp(w.rule.app)
+                     ? L"Выбрано: " + AppTitle(w.rule.app) + L" — приложение из пакета, правило действует "
+                                                               L"через драйвер WFP"
+                     : L"Выбрано: " + w.rule.app;
     } else if (!w.appsLoaded) {
         chosen = L"Загружается список программ…";
     } else if (w.apps.empty()) {
@@ -1039,9 +1080,17 @@ INT_PTR CALLBACK WizardAppPage(HWND page, UINT msg, WPARAM wp, LPARAM lp)
             if (const auto dup = FindDuplicateRule(g.config, w->rule.app)) {
                 Message(page, std::format(L"Правило для «{}» уже есть. Чтобы поменять интерфейс, выберите его "
                                           L"в списке правил и нажмите «Изменить…».",
-                                          FileNameOf(g.config.rules[*dup].app)),
+                                          AppTitle(g.config.rules[*dup].app)),
                         MB_ICONINFORMATION);
                 StayOnPage(page);
+            } else if (IsPackageApp(w->rule.app) && QueryWfpDriver() != WfpDriverState::Running) {
+                Message(page,
+                        L"Приложение из Microsoft Store или MSIX нельзя запустить через AppRoute с внедрением, "
+                        L"поэтому правило для него действует только через драйвер WFP: приложение "
+                        L"запускается как обычно, а трафик направляет драйвер.\n\n"
+                        L"Драйвер сейчас не запущен. Правило сохранится и начнёт действовать после "
+                        L"установки службы с драйвером.",
+                        MB_ICONINFORMATION);
             }
             return TRUE;
         }
@@ -1191,6 +1240,15 @@ INT_PTR CALLBACK WizardAdapterPage(HWND page, UINT msg, WPARAM, LPARAM lp)
             PropSheet_PressButton(w->sheet, PSBTN_NEXT);
             return TRUE;
         }
+        if (hdr->code == PSN_WIZNEXT && IsPackageApp(w->rule.app) &&
+            (!w->rule.proxy.empty() || TargetId(w->rule) == kOtherProxy)) {
+            Message(page,
+                    L"Для приложения из пакета нужен интерфейс: правило действует через драйвер WFP, "
+                    L"а прокси — только для программ, запущенных через AppRoute.",
+                    MB_ICONINFORMATION);
+            NotifyResult(page, -1);
+            return TRUE;
+        }
         if (hdr->code == PSN_WIZNEXT && TargetId(w->rule) == kOtherProxy) {
             // Адрес «другого» прокси — перед переходом дальше; отмена — остаёмся на шаге
             const auto proxy = AskProxyAddress(page, L"");
@@ -1239,7 +1297,7 @@ INT_PTR CALLBACK WizardPolicyPage(HWND page, UINT msg, WPARAM, LPARAM lp)
             CheckRadioButton(page, IDC_WPOL_BLOCK, IDC_WPOL_DEFAULT, block ? IDC_WPOL_BLOCK : IDC_WPOL_DEFAULT);
             EnableWindow(GetDlgItem(page, IDC_WPOL_DEFAULT), !proxy);
             EnableWindow(GetDlgItem(page, IDC_WPOL_DEFAULT_TEXT), !proxy);
-            const std::wstring summary = std::format(L"Программа: {}\n{}: {}{}", FileNameOf(w->rule.app),
+            const std::wstring summary = std::format(L"Программа: {}\n{}: {}{}", AppTitle(w->rule.app),
                                                      proxy ? L"Цель" : L"Интерфейс", TargetLabel(w->rule),
                                                      proxy ? L"\nЕсли прокси не отвечает, соединения программы не устанавливаются." : L"");
             SetDlgItemTextW(page, IDC_WPOL_SUMMARY, summary.c_str());
@@ -2000,7 +2058,7 @@ void RemoveSelected()
         return;
     }
     const std::wstring app = g.config.rules[*index].app;
-    std::wstring question = std::format(L"Удалить правило для «{}»?", FileNameOf(app));
+    std::wstring question = std::format(L"Удалить правило для «{}»?", AppTitle(app));
     if (IsPath(app)) {
         question += L"\n\n" + app;
     }
@@ -2015,6 +2073,32 @@ void RemoveSelected()
     Save(L"Правило удалено", next);
 }
 
+// Приложение из пакета: штатная активация Windows, правило применяет драйвер WFP (#45)
+void LaunchPackageRule(const Rule& rule)
+{
+    const std::wstring title = AppTitle(rule.app);
+    const bool driver = QueryWfpDriver() == WfpDriverState::Running;
+    if (!driver &&
+        Message(g.main,
+                std::format(L"Правило для «{}» действует только через драйвер WFP, а он не запущен — "
+                            L"приложение запустится без правила.\n\nЗапустить всё равно?",
+                            title),
+                MB_ICONWARNING | MB_YESNO) != IDYES) {
+        return;
+    }
+    SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    DWORD pid = 0;
+    std::wstring error;
+    if (!LaunchPackagedApp(rule.app, L"", &pid, &error)) {
+        Message(g.main, std::format(L"Не удалось запустить «{}»: {}", title, error), MB_ICONWARNING);
+        SetStatus(L"Не запущено: " + error);
+        return;
+    }
+    SetStatus(driver ? std::format(L"Запущено: {} (PID {}) — трафик через «{}» (драйвер WFP)", title, pid,
+                                   TargetLabel(rule))
+                     : std::format(L"Запущено без правила: {} (PID {})", title, pid));
+}
+
 void LaunchSelected()
 {
     const auto index = SelectedRule();
@@ -2022,6 +2106,10 @@ void LaunchSelected()
         return;
     }
     const Rule& rule = g.config.rules[*index];
+    if (IsPackageApp(rule.app)) {
+        LaunchPackageRule(rule);
+        return;
+    }
     LaunchRequest request = RequestForRule(rule, CommandLineForApp(rule.app));
     request.inheritStdHandles = false;
 

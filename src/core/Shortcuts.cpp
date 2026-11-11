@@ -1,6 +1,7 @@
 #include "core/Shortcuts.h"
 
 #include "core/Com.h"
+#include "core/PackagedApps.h"
 #include "core/Util.h"
 
 #include <shlobj.h>
@@ -66,6 +67,13 @@ std::wstring QuoteArgument(std::wstring_view arg)
 std::optional<ShortcutSpec> LaunchShortcutFor(const Rule& rule, const std::wstring& launcherExe,
                                               const std::wstring& configPath, std::wstring* error)
 {
+    if (IsPackageApp(rule.app)) {
+        if (error) {
+            *error = L"Приложение из пакета запускайте как обычно — из меню «Пуск»: правило для него "
+                     L"действует через драйвер WFP, ярлык AppRoute не нужен.";
+        }
+        return std::nullopt;
+    }
     if (rule.app.find_first_of(L"\\/") == std::wstring::npos) {
         if (error) {
             *error = L"В правиле указано только имя файла программы — для ярлыка нужен полный путь. "

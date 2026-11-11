@@ -2,6 +2,7 @@
 #include "core/Config.h"
 
 #include "core/Json.h"
+#include "core/PackagedApps.h"
 #include "core/Util.h"
 
 #include <shlobj.h>
@@ -495,6 +496,10 @@ std::optional<std::wstring> ValidateRule(const Rule& rule)
         return L"Путь к программе содержит недопустимые символы.";
     }
     if (!rule.proxy.empty()) {
+        if (IsPackageApp(rule.app)) {
+            return L"Для приложения из пакета нужен интерфейс: правило действует через драйвер WFP, "
+                   L"а прокси — только для программ, запущенных через AppRoute.";
+        }
         if (!ParseProxyAddress(rule.proxy)) {
             return L"Адрес прокси — IP-адрес и порт, например 127.0.0.1:10808.";
         }

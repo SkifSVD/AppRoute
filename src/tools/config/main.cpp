@@ -4,9 +4,11 @@
 //   approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [--on-unavailable block|default]
 //                   [--dns adapter|system] [--ipv6 follow|block|default] [--no-children]
 //   approute-config [--config FILE] remove PROGRAM
+//   approute-config packages
 
 #include "core/Config.h"
 #include "core/NetAdapters.h"
+#include "core/PackagedApps.h"
 #include "core/Socks5.h"
 #include "core/Util.h"
 
@@ -48,8 +50,11 @@ void PrintUsage()
     Line(L"  approute-config [--config FILE] check             проверить конфиг");
     Line(L"  approute-config [--config FILE] add PROGRAM --adapter IF | --proxy ADDR [параметры]");
     Line(L"  approute-config [--config FILE] remove PROGRAM");
+    Line(L"  approute-config packages                          приложения из Microsoft Store и MSIX");
     Line(L"");
-    Line(L"  PROGRAM            путь к программе или только имя файла (подходит в любом каталоге)");
+    Line(L"  PROGRAM            путь к программе, только имя файла (подходит в любом каталоге) или");
+    Line(L"                     приложение из пакета: Семейство!Id, см. packages. Такое правило");
+    Line(L"                     действует только через драйвер WFP");
     Line(L"  --adapter IF       ifIndex, GUID или имя интерфейса; в конфиг пишется GUID");
     Line(L"  --proxy ADDR       вместо интерфейса — SOCKS5-прокси, например 127.0.0.1:10808");
     Line(L"  --on-unavailable   block (по умолчанию) | default — если интерфейс отключён");
@@ -94,7 +99,8 @@ int Show(const Config& config)
         return 0;
     }
     for (const auto& rule : config.rules) {
-        Line(std::format(L"{}", rule.app));
+        Line(IsPackageApp(rule.app) ? std::format(L"{} ({}, из пакета)", rule.app, PackagedAppName(rule.app))
+                                    : rule.app);
         Line(std::format(L"    → {}", rule.proxy.empty() ? adapterLabel(rule.adapter) : L"SOCKS5-прокси " + rule.proxy));
         Line(std::format(L"    onUnavailable={} dns={} ipv6={} includeChildren={}", Name(rule.onUnavailable),
                          Name(rule.dns), Name(rule.ipv6), rule.includeChildren ? L"true" : L"false"));
@@ -167,6 +173,10 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
         RememberAdapter(config, {rule.adapter, adapter->alias, adapter->description});
         target = adapter->alias;
     }
+    if (const auto problem = ValidateRule(rule)) {
+        Line(L"Ошибка: " + *problem);
+        return 1;
+    }
 
     bool replaced = false;
     for (auto& existing : config.rules) {
@@ -184,6 +194,23 @@ int Add(Config& config, const std::wstring& path, const std::vector<std::wstring
         return 1;
     }
     Line(std::format(L"{}: {} → {}", replaced ? L"Правило обновлено" : L"Правило добавлено", rule.app, target));
+    return 0;
+}
+
+int Packages()
+{
+    const auto apps = EnumeratePackagedApps();
+    if (apps.empty()) {
+        Line(L"Приложений полного доверия из пакетов не найдено.");
+        return 0;
+    }
+    for (const auto& a : apps) {
+        Line(a.name);
+        Line(std::format(L"    {}", a.app));
+        Line(std::format(L"    {}", a.executable));
+    }
+    Line(L"");
+    Line(L"Правило: approute-config add Семейство!Id --adapter IF (действует через драйвер WFP).");
     return 0;
 }
 
@@ -229,6 +256,9 @@ int wmain(int argc, wchar_t** argv)
     if (command == L"path") {
         Line(path);
         return 0;
+    }
+    if (command == L"packages") {
+        return Packages();
     }
 
     std::wstring error;

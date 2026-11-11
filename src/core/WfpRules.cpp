@@ -70,7 +70,11 @@ WfpRulesReport WfpRules::Update(const Config& config, const std::wstring& userSi
         break;
     }
 
-    WfpPlan plan = WfpPlanFromConfig(config, EnumerateAdapters(), userSid);
+    // Путь к exe пакета меняется с обновлением — ищется при каждом применении (#45)
+    WfpPlan plan = WfpPlanFromConfig(config, EnumerateAdapters(), userSid,
+                                     [&](std::wstring_view app, std::wstring* error) {
+                                         return FindPackageExecutables(app, userSid, error);
+                                     });
     std::vector<std::wstring> notes = plan.notes;
     if (!applied_ || !SameWfpPlan(*applied_, plan)) {
         std::wstring error;
