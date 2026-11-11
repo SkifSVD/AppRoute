@@ -29,7 +29,7 @@ BEGIN
     LTEXT           "", IDC_STATUS, 7, 213, 456, 10, SS_ENDELLIPSIS | SS_NOPREFIX
 END
 
-IDD_RULE DIALOGEX 0, 0, 330, 186
+IDD_RULE DIALOGEX 0, 0, 330, 189
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Правило"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -49,9 +49,10 @@ BEGIN
     LTEXT           "IPv&6, если у интерфейса его нет:", IDC_LABEL_IPV6, 7, 119, 130, 9
     COMBOBOX        IDC_IPV6, 140, 117, 183, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX    "Применять к &дочерним процессам", IDC_CHILDREN, 7, 137, 316, 10
+    AUTOCHECKBOX    "&Запускать при входе в Windows через AppRoute", IDC_AUTOSTART, 7, 150, 316, 10
 
-    DEFPUSHBUTTON   "OK", IDOK, 216, 165, 50, 14
-    PUSHBUTTON      "Отмена", IDCANCEL, 273, 165, 50, 14
+    DEFPUSHBUTTON   "OK", IDOK, 216, 168, 50, 14
+    PUSHBUTTON      "Отмена", IDCANCEL, 273, 168, 50, 14
 END
 
 // Мастер «Новое правило» (Aero Wizard): шаг 1 — программа
