@@ -875,12 +875,13 @@ int CmdInstallService(const Options& options)
         return 1;
     }
     Line(std::format(L"Служба AppRoute установлена в {} и запущена; правила: {}", InstallDirectory(), config));
+    Line(L"Журнал: %ProgramData%\\AppRoute\\routes.log. Удаление — approute-routes uninstall-service.");
+    // Последней строкой — итог по драйверу: approute-gui показывает её, если драйвер не встал
     if (!driverNote.empty()) {
         Line(L"Внимание: " + driverNote + L".");
     } else if (options.withDriver) {
         Line(L"Драйвер approute-wfp установлен: правила действуют для программ, запущенных любым способом.");
     }
-    Line(L"Журнал: %ProgramData%\\AppRoute\\routes.log. Удаление — approute-routes uninstall-service.");
     return 0;
 }
 
