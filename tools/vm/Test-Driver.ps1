@@ -96,7 +96,8 @@ Check 'фильтров AppRoute не осталось' ($left -eq 0) "найд�
 sc.exe stop approute-wfp | Out-Null
 Start-Sleep 2
 $stats = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\approute-wfp' -Name Stats -ErrorAction SilentlyContinue).Stats
-$statNames = 'вызовов', 'нет права записи', 'нет цели', 'не UDP', 'ошибка доступа', 'подменён', 'не подменён'
+$statNames = 'вызовов', 'нет права записи', 'нет classifyContext', 'нет контекста провайдера', 'не тот тип',
+    'не тот размер', 'не та версия', 'не UDP', 'ошибка доступа', 'подменён', 'не подменён', 'тип', 'размер'
 $statsText = if ($stats) {
     $n = 0
     foreach ($callout in 'bind v4', 'bind v6', 'connect v4', 'connect v6') {

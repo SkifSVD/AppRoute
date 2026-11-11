@@ -42,11 +42,17 @@ static PDEVICE_OBJECT g_device = NULL;
 enum {
     STAT_CALLS,        /* вызовов classify */
     STAT_NO_RIGHTS,    /* нет права на запись: решение принято раньше */
-    STAT_NO_TARGET,    /* нет контекста с целью */
+    STAT_NO_CLASSIFY_CONTEXT, /* classifyContext == NULL */
+    STAT_NO_PROVIDER_CONTEXT, /* у фильтра нет контекста провайдера */
+    STAT_BAD_TYPE,     /* контекст не FWPM_GENERAL_CONTEXT */
+    STAT_BAD_SIZE,     /* размер данных не sizeof(APPROUTE_TARGET) */
+    STAT_BAD_VERSION,  /* версия цели не та */
     STAT_SKIP_PROTO,   /* bind не UDP */
     STAT_ACQUIRE_FAIL, /* не удалось получить данные для записи */
     STAT_CHANGED,      /* адрес подменён */
     STAT_UNCHANGED,    /* адрес оставлен (исключение, нет адреса семейства, уже наш) */
+    STAT_LAST_TYPE,    /* последний увиденный тип контекста (не счётчик) */
+    STAT_LAST_SIZE,    /* последний увиденный размер данных (не счётчик) */
     STAT_COUNT
 };
 static volatile LONG g_stats[4][STAT_COUNT];
@@ -67,16 +73,31 @@ static CALLOUT_REG g_callouts[] = {
     {&APPROUTE_CALLOUT_CONNECT_V6, FALSE, TRUE, 0},
 };
 
-/* Цель из контекста провайдера фильтра; NULL — контекста нет или он не нашего формата */
-static const APPROUTE_TARGET* TargetOf(const FWPS_FILTER3* filter)
+/* Цель из контекста провайдера фильтра; NULL — контекста нет или он не нашего формата
+   (*reason — номер счётчика причины) */
+static const APPROUTE_TARGET* TargetOf(const FWPS_FILTER3* filter, ULONG calloutIndex, int* reason)
 {
     const FWPM_PROVIDER_CONTEXT3* pc = filter->providerContext;
-    if (pc == NULL || pc->type != FWPM_GENERAL_CONTEXT || pc->dataBuffer == NULL ||
-        pc->dataBuffer->size != sizeof(APPROUTE_TARGET) || pc->dataBuffer->data == NULL) {
+    if (pc == NULL) {
+        *reason = STAT_NO_PROVIDER_CONTEXT;
+        return NULL;
+    }
+    InterlockedExchange(&g_stats[calloutIndex][STAT_LAST_TYPE], (LONG)pc->type);
+    if (pc->type != FWPM_GENERAL_CONTEXT || pc->dataBuffer == NULL) {
+        *reason = STAT_BAD_TYPE;
+        return NULL;
+    }
+    InterlockedExchange(&g_stats[calloutIndex][STAT_LAST_SIZE], (LONG)pc->dataBuffer->size);
+    if (pc->dataBuffer->size != sizeof(APPROUTE_TARGET) || pc->dataBuffer->data == NULL) {
+        *reason = STAT_BAD_SIZE;
         return NULL;
     }
     const APPROUTE_TARGET* t = (const APPROUTE_TARGET*)pc->dataBuffer->data;
-    return t->version == APPROUTE_TARGET_VERSION ? t : NULL;
+    if (t->version != APPROUTE_TARGET_VERSION) {
+        *reason = STAT_BAD_VERSION;
+        return NULL;
+    }
+    return t;
 }
 
 /* Адреса, которые не трогаем: loopback, link-local, multicast */
@@ -186,9 +207,15 @@ static void NTAPI Classify(const FWPS_INCOMING_VALUES0* inFixedValues, const FWP
         STAT(STAT_NO_RIGHTS);
         return;   /* решение уже принято фильтром с большим весом */
     }
-    const APPROUTE_TARGET* target = TargetOf(filter);
-    if (target == NULL || classifyContext == NULL) {
-        STAT(STAT_NO_TARGET);
+    if (classifyContext == NULL) {
+        STAT(STAT_NO_CLASSIFY_CONTEXT);
+        PermitAndKeepWriting(classifyOut, filter);
+        return;
+    }
+    int reason = 0;
+    const APPROUTE_TARGET* target = TargetOf(filter, calloutIndex, &reason);
+    if (target == NULL) {
+        InterlockedIncrement(&g_stats[calloutIndex][reason]);
         PermitAndKeepWriting(classifyOut, filter);
         return;
     }
