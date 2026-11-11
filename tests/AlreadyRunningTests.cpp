@@ -27,7 +27,13 @@ bool Contains(const std::vector<DWORD>& pids, DWORD pid)
 
 TEST(ImageRunsWithoutRuleFindsPlainProcess)
 {
-    // ping.exe, запущенный обычным способом (без hook-DLL), — «уже работающая копия без правила»
+    // ping.exe, запущенный обычным способом (без hook-DLL), — «уже работающая копия без правила».
+    // Если сами тесты запущены из программы под AppRoute (с дочерними процессами), ping тоже
+    // получит hook-DLL — проверка «без правила» тогда не имеет смысла.
+    if (GetModuleHandleW(L"approute-hook64.dll") || GetModuleHandleW(L"approute-hook32.dll")) {
+        std::printf("  (пропуск: тесты запущены под AppRoute — дочерние процессы получают hook-DLL)\n");
+        return;
+    }
     const std::wstring ping = SystemExe(L"PING.EXE");
     std::wstring cmd = L"\"" + ping + L"\" -n 30 127.0.0.1";
     STARTUPINFOW si{};

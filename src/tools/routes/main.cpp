@@ -92,7 +92,8 @@ std::wstring Now()
 {
     SYSTEMTIME t{};
     GetLocalTime(&t);
-    return std::format(L"{:02}:{:02}:{:02}", t.wHour, t.wMinute, t.wSecond);
+    return std::format(L"{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                       t.wSecond);
 }
 
 std::wstring FirstAddress(const NetAdapter& a, ADDRESS_FAMILY family, bool withPrefix)
