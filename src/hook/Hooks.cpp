@@ -67,6 +67,11 @@ LPFN_CONNECTEX Real_ConnectEx = nullptr;
 // соединения, когда станет известно семейство адреса назначения. Значение — порт (сетевой порядок).
 SRWLOCK g_deferredLock = SRWLOCK_INIT;
 std::unordered_map<SOCKET, USHORT> g_deferred;
+// Двухстековые сокеты, которые пришлось привязать к "::" из-за getsockname до соединения (#20).
+// Обычно это mDNS и другие локальные службы (UDP 5353 → ff02::fb) — им "::" и нужен. Перепривязать
+// сокет нельзя, поэтому соединения и отправки с него за пределы локальной сети подчиняются
+// политике правила: «блокировать» — блокируются, «маршрутом по умолчанию» — идут как есть.
+std::unordered_map<SOCKET, int> g_earlyBound;   // значение — SO_TYPE
 
 // --- адреса -------------------------------------------------------------------------------
 
@@ -424,7 +429,30 @@ bool PrepareSocket(SOCKET s, const sockaddr* dest, int destLen, const wchar_t* a
         sockaddr_storage local{};
         int localLen = sizeof(local);
         if (Real_getsockname(s, reinterpret_cast<sockaddr*>(&local), &localLen) == 0) {
-            return true;   // уже привязан (нами в bind() или самим процессом к конкретному адресу)
+            // уже привязан (нами в bind() или самим процессом к конкретному адресу)
+            std::optional<int> early;
+            AcquireSRWLockShared(&g_deferredLock);
+            if (auto it = g_earlyBound.find(s); it != g_earlyBound.end()) {
+                early = it->second;
+            }
+            ReleaseSRWLockShared(&g_deferredLock);
+            if (!early) {
+                return true;
+            }
+            const SOCKADDR_INET t = Unmap(d);
+            if (g_resolver.IsLocalDestination(t)) {
+                return true;   // локальная сеть, multicast — напрямую, как и без правила
+            }
+            const wchar_t* kind = *early == SOCK_DGRAM ? L"UDP" : L"TCP";
+            if (g_policy.UseDefaultRoute(t.si_family == AF_INET6)) {
+                Log(L"%ls → %ls: %ls-сокет привязан к :: (getsockname до соединения) — маршрутом по умолчанию "
+                    L"(default)", api, Describe(t).c_str(), kind);
+                return true;
+            }
+            Log(L"%ls → %ls: заблокировано — %ls-сокет привязан к :: (getsockname до соединения), "
+                L"к интерфейсу его не привязать", api, Describe(t).c_str(), kind);
+            WSASetLastError(WSAENETUNREACH);
+            return false;
         }
         if (WSAGetLastError() != WSAEINVAL) {
             return true;   // не сокет / закрыт — пусть оригинал вернёт свою ошибку
@@ -632,8 +660,16 @@ int WSAAPI Hook_getsockname(SOCKET s, sockaddr* name, int* namelen)
 {
     if (const auto port = TakeDeferred(s)) {
         // Процессу нужен локальный адрес до соединения — привязываем как просили
-        Log(L"getsockname до соединения на двухстековом сокете: привязка к :: (возможна утечка)");
+        int type = 0;
+        int typeLen = sizeof(type);
+        getsockopt(s, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &typeLen);
+        Log(L"getsockname до соединения на двухстековом %ls-сокете (порт %u): привязка к :: — дальше с него "
+            L"только локальная сеть",
+            type == SOCK_DGRAM ? L"UDP" : L"TCP", static_cast<unsigned>(ntohs(*port)));
         BindDeferredAsRequested(s, *port);
+        AcquireSRWLockExclusive(&g_deferredLock);
+        g_earlyBound[s] = type;
+        ReleaseSRWLockExclusive(&g_deferredLock);
     }
     return Real_getsockname(s, name, namelen);
 }
@@ -668,6 +704,9 @@ int WSAAPI Hook_setsockopt(SOCKET s, int level, int optname, const char* optval,
 int WSAAPI Hook_closesocket(SOCKET s)
 {
     TakeDeferred(s);
+    AcquireSRWLockExclusive(&g_deferredLock);
+    g_earlyBound.erase(s);
+    ReleaseSRWLockExclusive(&g_deferredLock);
     if (g_proxy) {
         AcquireSRWLockExclusive(&g_proxiedLock);
         g_proxied.erase(s);
