@@ -36,8 +36,8 @@ void Log(const wchar_t* format, ...)
     SYSTEMTIME t{};
     GetLocalTime(&t);
     wchar_t line[1200];
-    _snwprintf_s(line, _TRUNCATE, L"%02u:%02u:%02u.%03u [AppRoute %lu] %ls\r\n",
-                 t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId(), message);
+    _snwprintf_s(line, _TRUNCATE, L"%04u-%02u-%02u %02u:%02u:%02u.%03u [AppRoute %lu] %ls\r\n", t.wYear, t.wMonth,
+                 t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId(), message);
 
     OutputDebugStringW(line);
 

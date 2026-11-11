@@ -448,6 +448,58 @@ LaunchRequest RequestForRule(const Rule& rule, std::wstring commandLine)
     return request;
 }
 
+std::wstring HookLogDirectory()
+{
+    wchar_t local[MAX_PATH * 2] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, static_cast<DWORD>(std::size(local)));
+    if (n == 0 || n >= std::size(local)) {
+        return {};
+    }
+    return std::wstring(local) + L"\\AppRoute\\logs";
+}
+
+std::wstring HookLogFileName(std::wstring_view app)
+{
+    std::wstring name(app);
+    if (!IsPackageApp(app)) {
+        if (const size_t slash = name.find_last_of(L"\\/"); slash != std::wstring::npos) {
+            name = name.substr(slash + 1);
+        }
+        if (name.size() > 4 && EqualsIgnoreCase(std::wstring_view(name).substr(name.size() - 4), L".exe")) {
+            name.resize(name.size() - 4);
+        }
+    }
+    for (wchar_t& c : name) {
+        if (c < 32 || std::wstring_view(L"<>:\"/\\|?*!%").find(c) != std::wstring_view::npos) {
+            c = L'_';
+        }
+    }
+    while (!name.empty() && (name.back() == L'.' || name.back() == L' ')) {
+        name.pop_back();
+    }
+    if (name.empty()) {
+        name = L"app";
+    }
+    return name + L".log";
+}
+
+std::wstring PrepareHookLog(std::wstring_view app)
+{
+    const std::wstring dir = HookLogDirectory();
+    if (dir.empty()) {
+        return {};
+    }
+    CreateDirectoryW((dir.substr(0, dir.size() - 5)).c_str(), nullptr);   // ...\AppRoute
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring log = dir + L"\\" + HookLogFileName(app);
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (GetFileAttributesExW(log.c_str(), GetFileExInfoStandard, &info) &&
+        ((static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow) > kHookLogLimit) {
+        MoveFileExW(log.c_str(), (log + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);   // занят — пишем дальше
+    }
+    return log;
+}
+
 std::wstring CommandLineForApp(std::wstring_view app)
 {
     std::wstring path(app);

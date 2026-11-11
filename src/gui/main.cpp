@@ -2098,6 +2098,7 @@ void ShowTrayMenu()
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"&Открыть AppRoute");
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_LOGS, L"&Журналы запусков");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"&Выход");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, (std::wstring(L"Версия ") + AppRouteBuild()).c_str());
@@ -2117,6 +2118,13 @@ void ShowTrayMenu()
             ShowMain();   // окно согласия — поверх главного окна
         }
         ToggleManager();
+    } else if (choice == IDM_TRAY_LOGS) {
+        // Папка журналов hook-DLL (#68); журнал менеджера маршрутов — уровнем выше
+        const std::wstring dir = HookLogDirectory();
+        if (!dir.empty()) {
+            SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     } else if (choice == IDM_TRAY_OPEN) {
         ShowMain();
     } else if (choice == IDM_TRAY_EXIT) {
@@ -2185,6 +2193,7 @@ void LaunchSelected()
     const Rule& rule = g.config.rules[*index];
     LaunchRequest request = RequestForRule(rule, CommandLineForApp(rule.app));
     request.inheritStdHandles = false;
+    request.logPath = PrepareHookLog(rule.app);   // журнал hook-DLL (#68)
 
     SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     const LaunchResult result = LaunchWithRule(request);
@@ -2550,6 +2559,7 @@ int RunFromShortcut(const Arguments& args)
     }
     LaunchRequest request = RequestForRule(*rule, CommandLineForApp(app) + args.programArguments);
     request.inheritStdHandles = false;
+    request.logPath = PrepareHookLog(rule->app);
     const LaunchResult result = LaunchWithRule(request);
     if (!result.Ok()) {
         Message(nullptr, std::format(L"Не удалось запустить «{}» через AppRoute:\n\n{}", AppTitle(app),
@@ -2598,6 +2608,7 @@ int RunAutostart(const Arguments& args)
             }
             LaunchRequest request = RequestForRule(rule, CommandLineForApp(rule.app));
             request.inheritStdHandles = false;
+            request.logPath = PrepareHookLog(rule.app);
             const LaunchResult result = LaunchWithRule(request);
             if (!result.Ok()) {
                 problems += std::format(L"• {}: {}\n", AppTitle(rule.app), result.message);

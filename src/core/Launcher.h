@@ -53,6 +53,23 @@ LaunchResult LaunchWithRule(const LaunchRequest& request);
 // командной строки approute-run) вызывающий применяет поверх.
 LaunchRequest RequestForRule(const Rule& rule, std::wstring commandLine);
 
+// --- Журнал hook-DLL для запусков из approute-gui (#68) -----------------------------------------
+//
+// %LOCALAPPDATA%\AppRoute\logs\<программа>.log — один файл на программу правила (дочерние
+// процессы пишут туда же); больше kHookLogLimit — прежний переносится в .1.
+
+inline constexpr unsigned long long kHookLogLimit = 1024 * 1024;
+
+// %LOCALAPPDATA%\AppRoute\logs
+std::wstring HookLogDirectory();
+
+// Имя файла журнала для программы правила: "C:\...\Telegram.exe" → "Telegram.log",
+// "Семейство!App" → "Семейство_App.log"; недопустимые в именах файлов символы — "_"
+std::wstring HookLogFileName(std::wstring_view app);
+
+// Создать папку, перенести большой журнал в .1; путь журнала или пусто (нет %LOCALAPPDATA%)
+std::wstring PrepareHookLog(std::wstring_view app);
+
 // --- Приложения из пакетов MSIX и Microsoft Store (#59) ----------------------------------------
 //
 // Процесс приложения из пакета создаёт Windows, а не AppRoute, поэтому hook-DLL внедряется
