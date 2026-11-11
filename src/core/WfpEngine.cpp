@@ -129,6 +129,9 @@ bool WfpEngine::EnsureBaseObjects(std::wstring* error)
         callout.displayData = Display(c.name);
         callout.providerKey = const_cast<GUID*>(&APPROUTE_WFP_PROVIDER);
         callout.applicableLayer = *c.layer;
+        // Без этого флага WFP не передаёт драйверу контекст провайдера фильтра (цель правила):
+        // FWPS_FILTER3::providerContext приходит NULL
+        callout.flags = FWPM_CALLOUT_FLAG_USES_PROVIDER_CONTEXT;
         rc = FwpmCalloutAdd0(engine_, &callout, nullptr, nullptr);
         if (rc != ERROR_SUCCESS && rc != static_cast<DWORD>(FWP_E_ALREADY_EXISTS)) {
             return Fail(error, L"не удалось добавить callout WFP", rc);
