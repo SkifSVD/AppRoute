@@ -9,6 +9,7 @@
 #include "core/Win.h"
 
 #include <string>
+#include <vector>
 
 namespace approute {
 
@@ -47,6 +48,14 @@ struct LaunchResult {
 };
 
 LaunchResult LaunchWithRule(const LaunchRequest& request);
+
+// Процессы текущего пользователя с этим exe без hook-DLL, кроме exceptPid (#70): запущенная через
+// AppRoute копия может передать им окно и завершиться — тогда правило не действует.
+// LaunchWithRule проверяет это сам и пишет предупреждение в LaunchResult::warning.
+std::vector<DWORD> ImageRunsWithoutRule(const std::wstring& image, DWORD exceptPid);
+
+// Текст предупреждения: программа уже запущена без AppRoute
+std::wstring AlreadyRunningWarning(const std::wstring& image, size_t processes);
 
 // Запрос на запуск по правилу конфига; commandLine — программа и аргументы (для приложения из
 // пакета программа — его AUMID, аргументы передаются активации). Переопределения (параметры

@@ -157,6 +157,55 @@ bool PackageRunsWithoutRule(const std::wstring& fullName)
     return found;
 }
 
+} // namespace
+
+std::vector<DWORD> ImageRunsWithoutRule(const std::wstring& image, DWORD exceptPid)
+{
+    std::vector<DWORD> out;
+    if (image.empty()) {
+        return out;
+    }
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return out;
+    }
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+        if (entry.th32ProcessID == exceptPid || entry.th32ProcessID == GetCurrentProcessId()) {
+            continue;
+        }
+        // Сначала дешёвая проверка имени файла, потом полный путь
+        const std::wstring_view name = std::wstring_view(image).substr(image.find_last_of(L"\\/") + 1);
+        if (!EqualsIgnoreCase(entry.szExeFile, name)) {
+            continue;
+        }
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        if (!process) {
+            continue;
+        }
+        if (EqualsIgnoreCase(GetProcessImageName(process), image) && ProcessUserMatchesCurrent(process) &&
+            !ProcessHasModule(entry.th32ProcessID, HookDllPath(L"", IsProcessWow64(process)))) {
+            out.push_back(entry.th32ProcessID);
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snapshot);
+    return out;
+}
+
+std::wstring AlreadyRunningWarning(const std::wstring& image, size_t processes)
+{
+    const std::wstring_view name = std::wstring_view(image).substr(image.find_last_of(L"\\/") + 1);
+    return std::format(L"{} уже была запущена без AppRoute (процессов: {}). Многие программы — браузеры, "
+                       L"мессенджеры — открывают новое окно в уже работающей копии, и тогда правило на неё не "
+                       L"действует: трафик идёт маршрутом по умолчанию, блокировка не срабатывает. Закройте программу "
+                       L"полностью, в том числе из трея и фонового режима, и запустите через AppRoute снова.",
+                       name, processes);
+}
+
+namespace {
+
 LaunchResult LaunchPackage(const LaunchRequest& request, const EnvVars& vars, const std::wstring& binDir)
 {
     LaunchResult result;
@@ -421,6 +470,12 @@ LaunchResult LaunchWithRule(const LaunchRequest& request)
         return abort(LaunchStatus::InjectFailed, rc,
                      std::format(L"Ошибка внедрения DLL ({}-бит): {}{}", result.is32Bit ? 32 : 64,
                                  Win32ErrorMessage(rc), hint));
+    }
+
+    // Уже работающая копия без правила (#70): новый процесс может передать ей окно и завершиться.
+    // Проверка — до запуска нового: его дочерние процессы ещё не появились.
+    if (const auto running = ImageRunsWithoutRule(result.image, pi.dwProcessId); !running.empty()) {
+        result.warning = AlreadyRunningWarning(result.image, running.size());
     }
 
     ResumeThread(pi.hThread);

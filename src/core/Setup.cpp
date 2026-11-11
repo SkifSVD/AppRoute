@@ -497,7 +497,15 @@ bool RemoveInstallFiles(const std::wstring& dir, SetupReport* report)
         return false;
     }
     DeleteFileW(Join(dir, kInstallMarker).c_str());
-    RemoveDirectoryW(dir.c_str());
+    // Удалённый файл, который ещё открыт (например, его проверяет антивирус или индексатор),
+    // исчезает из папки только после закрытия — пустые папки удаляются с несколькими попытками
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        RemoveTree(fs::path(dir), nullptr);
+        if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            break;
+        }
+        Sleep(100);
+    }
     return true;
 }
 
