@@ -1,7 +1,8 @@
 name: codeql
 
-# Статический анализ C/C++ (#77). Запускается на GitHub-hosted runner: для публичных
-# репозиториев минуты бесплатны, а self-hosted остаётся для обычной сборки и не занят.
+# Статический анализ C/C++ (#77). Идёт на том же self-hosted runner, что и сборка:
+# CI целиком локальный. Учтите, что runner выполняет одну задачу за раз, поэтому на PR
+# анализ и сборка идут последовательно.
 on:
   push:
     branches: [main]
@@ -21,7 +22,8 @@ concurrency:
 jobs:
   analyze:
     name: Analyze C/C++
-    runs-on: windows-latest
+    # Свой runner, как и у сборки: CI целиком локальный.
+    runs-on: [self-hosted, Windows, X64, approute]
     timeout-minutes: 60
     permissions:
       actions: read
