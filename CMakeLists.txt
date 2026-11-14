@@ -29,6 +29,12 @@ set(APPROUTE_SETUP_PAYLOAD "" CACHE PATH "Папка поставки для у�
 
 if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> /permissive- /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc> /Zc:__cplusplus)
+    # Предупреждения — ошибки: иначе опечатка в ветке ошибки (ручные CloseHandle, проверки Win32)
+    # проходит молча. Отключается ключом -DAPPROUTE_WARNINGS_AS_ERRORS=OFF.
+    option(APPROUTE_WARNINGS_AS_ERRORS "Считать предупреждения компилятора ошибками" ON)
+    if(APPROUTE_WARNINGS_AS_ERRORS)
+        add_compile_options(/WX)
+    endif()
 endif()
 
 include(cmake/AppRouteVersion.cmake)
