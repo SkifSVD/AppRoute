@@ -1,0 +1,52 @@
+name: codeql
+
+# Статический анализ C/C++ (#77). Идёт на том же self-hosted runner, что и сборка:
+# CI целиком локальный. Учтите, что runner выполняет одну задачу за раз, поэтому на PR
+# анализ и сборка идут последовательно.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # раз в неделю: ловит и то, что не менялось
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze C/C++
+    # Свой runner, как и у сборки: CI целиком локальный.
+    runs-on: [self-hosted, Windows, X64, approute]
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      security-events: write   # отправка результатов в Code scanning
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0      # версия считается по тегам выпусков (#63)
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Сборка тем же скриптом, что и в CI: CodeQL перехватывает вызовы cl.exe.
+      # Драйвер не анализируется — его собирает отдельный Build-Driver.ps1 с WDK.
+      - name: Build
+        run: ./build.ps1 -Config Release
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:c-cpp'
