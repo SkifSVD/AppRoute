@@ -44,6 +44,11 @@ jobs:
           Write-Host "AppRoute $version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      # Храповик размера файлов (docs/conventions.md): большие файлы только уменьшаются.
+      # Дешёвая проверка до сборки — падает раньше и понятнее, чем компилятор.
+      - name: Size ratchet
+        run: ./tools/Size-Ratchet.ps1
+
       # build.ps1 сам найдёт cmake из установленной Visual Studio. Поставка и установщик (#64) —
       # без тега: тег выпуска ставит владелец (build.ps1 -Publish у себя)
       - name: Build and test

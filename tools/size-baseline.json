@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "Потолок храповика (docs/conventions.md). Поднимать вручную нельзя: только -Write, и только вниз.",
+  "maxLines": 1000,
+  "paths": [
+    "src/",
+    "tests/"
+  ],
+  "files": {
+    "src/gui/main.cpp": 2529,
+    "src/hook/Hooks.cpp": 1101
+  }
+}
